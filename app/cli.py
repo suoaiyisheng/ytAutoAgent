@@ -4,11 +4,13 @@ import argparse
 import json
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import load_settings
 from app.errors import Stage1Error
-from app.models import TaskRecord
+from app.models import ImageGenerationRunRecord, TaskRecord
+from app.services.image_generation import ImageGenerationService
 from app.services.pipeline import Stage1Pipeline
 from app.services.providers import (
     GeminiEmbeddingProvider,
@@ -34,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--embed-model", default=None)
     run.add_argument("--batch-size", type=int, default=None)
     run.add_argument("--retry-max", type=int, default=None)
+
+    gen = sub.add_parser("generate-images", help="运行生图阶段（OSS+模型提供方）")
+    gen.add_argument("--job-id", required=True)
+    gen.add_argument("--shot-range", default=None)
+    gen.add_argument("--candidates-per-shot", type=int, default=4)
+    gen.add_argument("--aspect-ratio", default="9:16")
+    gen.add_argument("--concurrency", type=int, default=2)
     return parser
 
 
@@ -110,6 +119,58 @@ def run_full(args: argparse.Namespace) -> int:
     return 0
 
 
+def _save_image_generation_manifest(record: ImageGenerationRunRecord, pipeline_store: TaskStore) -> None:
+    pipeline_store.write_json(
+        pipeline_store.image_generation_manifest_path(record.task_id),
+        record.to_manifest(),
+    )
+
+
+def run_generate_images(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    store = TaskStore(settings.data_dir)
+    service = ImageGenerationService(store=store, settings=settings)
+    service.validate_ready()
+
+    task_id = str(args.job_id).strip()
+    task_dir = store.root_dir / task_id
+    if not task_dir.exists() or not task_dir.is_dir():
+        raise Stage1Error("task_not_found", "任务不存在", 404)
+
+    params = {
+        "shot_range": args.shot_range,
+        "candidates_per_shot": int(args.candidates_per_shot),
+        "aspect_ratio": str(args.aspect_ratio),
+        "concurrency": int(args.concurrency),
+    }
+    record = ImageGenerationRunRecord.new(task_id=task_id, params=params)
+    _save_image_generation_manifest(record, store)
+
+    def on_progress(progress: float, message: str) -> None:
+        record.progress = progress
+        record.status = "running"
+        record.updated_at = datetime.now(timezone.utc)
+        _save_image_generation_manifest(record, store)
+        store.append_log(task_id, f"[生图][{progress:.2f}%] {message}")
+
+    try:
+        result = service.run(task_id=task_id, params=params, progress_cb=on_progress)
+    except Stage1Error as exc:
+        record.status = "failed"
+        record.error = {"code": exc.code, "message": exc.message}
+        record.updated_at = datetime.now(timezone.utc)
+        _save_image_generation_manifest(record, store)
+        raise
+
+    record.status = "succeeded"
+    record.progress = 100.0
+    record.result = result
+    record.updated_at = datetime.now(timezone.utc)
+    _save_image_generation_manifest(record, store)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -117,6 +178,8 @@ def main() -> int:
     try:
         if args.command == "run-full":
             return run_full(args)
+        if args.command == "generate-images":
+            return run_generate_images(args)
     except Stage1Error as exc:
         print(json.dumps({"code": exc.code, "message": exc.message}, ensure_ascii=False), file=sys.stderr)
         return 1

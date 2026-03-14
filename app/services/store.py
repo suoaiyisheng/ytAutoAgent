@@ -43,6 +43,18 @@ class TaskStore:
     def markdown_path(self, task_id: str) -> Path:
         return self.task_dir(task_id) / "final_prompts.md"
 
+    def generation_inputs_path(self, task_id: str) -> Path:
+        return self.task_dir(task_id) / "06_generation_inputs.json"
+
+    def ref_oss_map_path(self, task_id: str) -> Path:
+        return self.task_dir(task_id) / "06_ref_oss_map.json"
+
+    def image_generation_manifest_path(self, task_id: str) -> Path:
+        return self.task_dir(task_id) / "07_image_generation_manifest.json"
+
+    def image_candidates_path(self, task_id: str) -> Path:
+        return self.task_dir(task_id) / "08_image_candidates.json"
+
     def save_manifest(self, record: TaskRecord) -> None:
         path = self.manifest_path(record.task_id)
         path.write_text(
@@ -77,6 +89,9 @@ class TaskStore:
 
     def write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def read_json(self, path: Path) -> dict[str, Any]:
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def append_log(self, task_id: str, message: str) -> None:
         ts = datetime.now(timezone.utc).isoformat()

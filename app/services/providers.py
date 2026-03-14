@@ -177,10 +177,12 @@ class GeminiVLMProvider(VLMProvider):
     ) -> dict[str, Any]:
         prompt = (
             "请严格按照系统规范输出最终 JSON。结构："
-            "{project_id, prompts:[{shot_id,image_prompt,video_prompt}]}。"
+            "{project_id, prompts:[{shot_id,reference_bindings:[{reference_index,ref_id,state_id,state_text}],image_prompt,video_prompt}]}。"
             "不要输出 markdown，不要解释。"
             "所有自然语言内容必须使用简体中文，"
             "image_prompt 与 video_prompt 必须全中文（字段名保持英文）。"
+            "输入 storyboard 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
+            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}（{state_text}状态）”，不得只写“参考图1/2”。"
         )
         parts = [
             {"text": architect_prompt},
@@ -196,6 +198,7 @@ class GeminiVLMProvider(VLMProvider):
                 prompts.append(
                     {
                         "shot_id": int(item.get("shot_id", 0)),
+                        "reference_bindings": item.get("reference_bindings", []),
                         "image_prompt": str(item.get("image_prompt", "")).strip(),
                         "video_prompt": str(item.get("video_prompt", "")).strip(),
                     }
@@ -476,8 +479,10 @@ class QwenVLMProvider(VLMProvider):
                         "type": "text",
                         "text": (
                             "请严格按系统规范输出 JSON："
-                            "{\"project_id\":\"string\",\"prompts\":[{\"shot_id\":number,\"image_prompt\":\"string\",\"video_prompt\":\"string\"}]}"
+                            "{\"project_id\":\"string\",\"prompts\":[{\"shot_id\":number,\"reference_bindings\":[{\"reference_index\":number,\"ref_id\":\"string\",\"state_id\":\"string|null\",\"state_text\":\"string\"}],\"image_prompt\":\"string\",\"video_prompt\":\"string\"}]}"
                             "。所有自然语言必须使用简体中文，不要输出 markdown，不要解释。"
+                            "输入 storyboard 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
+                            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}（{state_text}状态）”，不得只写“参考图1/2”。"
                         ),
                     },
                     {"type": "text", "text": json.dumps(character_bank, ensure_ascii=False)},
@@ -492,6 +497,7 @@ class QwenVLMProvider(VLMProvider):
                 prompts.append(
                     {
                         "shot_id": int(item.get("shot_id", 0)),
+                        "reference_bindings": item.get("reference_bindings", []),
                         "image_prompt": str(item.get("image_prompt", "")).strip(),
                         "video_prompt": str(item.get("video_prompt", "")).strip(),
                     }

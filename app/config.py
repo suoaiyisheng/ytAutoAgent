@@ -22,6 +22,25 @@ class Settings:
     gemini_embed_model: str
     pipeline_retry_max: int
     pipeline_batch_size: int
+    image_generation_provider: str
+    openrouter_api_key: str
+    openrouter_base_url: str
+    openrouter_image_model: str
+    volcengine_access_key_id: str
+    volcengine_access_key_secret: str
+    volcengine_session_token: str
+    volcengine_visual_host: str
+    volcengine_region: str
+    volcengine_service: str
+    volcengine_jimeng_req_key: str
+    volcengine_jimeng_version: str
+    volcengine_poll_interval_sec: float
+    volcengine_poll_timeout_sec: int
+    aliyun_oss_region: str
+    aliyun_oss_access_key_id: str
+    aliyun_oss_access_key_secret: str
+    aliyun_oss_bucket: str
+    aliyun_oss_public_domain: str
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -74,6 +93,10 @@ def load_settings() -> Settings:
     if embedding_provider not in {"qwen", "gemini"}:
         embedding_provider = vlm_provider
 
+    image_generation_provider = os.getenv("IMAGE_GENERATION_PROVIDER", "openrouter").strip().lower()
+    if image_generation_provider not in {"openrouter", "volcengine_jimeng30"}:
+        image_generation_provider = "openrouter"
+
     return Settings(
         data_dir=data_dir,
         max_workers=max_workers,
@@ -102,4 +125,28 @@ def load_settings() -> Settings:
         gemini_embed_model=os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004").strip() or "text-embedding-004",
         pipeline_retry_max=pipeline_retry_max,
         pipeline_batch_size=pipeline_batch_size,
+        image_generation_provider=image_generation_provider,
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+        or "https://openrouter.ai/api/v1",
+        openrouter_image_model=os.getenv("OPENROUTER_IMAGE_MODEL", "google/gemini-2.5-flash-image").strip()
+        or "google/gemini-2.5-flash-image",
+        volcengine_access_key_id=os.getenv("VOLCENGINE_ACCESS_KEY_ID", "").strip(),
+        volcengine_access_key_secret=os.getenv("VOLCENGINE_ACCESS_KEY_SECRET", "").strip(),
+        volcengine_session_token=os.getenv("VOLCENGINE_SESSION_TOKEN", "").strip(),
+        volcengine_visual_host=os.getenv("VOLCENGINE_VISUAL_HOST", "visual.volcengineapi.com").strip()
+        or "visual.volcengineapi.com",
+        volcengine_region=os.getenv("VOLCENGINE_REGION", "cn-north-1").strip() or "cn-north-1",
+        volcengine_service=os.getenv("VOLCENGINE_SERVICE", "cv").strip() or "cv",
+        volcengine_jimeng_req_key=os.getenv("VOLCENGINE_JIMENG_REQ_KEY", "jimeng_t2i_v30").strip()
+        or "jimeng_t2i_v30",
+        volcengine_jimeng_version=os.getenv("VOLCENGINE_JIMENG_VERSION", "2022-08-31").strip()
+        or "2022-08-31",
+        volcengine_poll_interval_sec=float(os.getenv("VOLCENGINE_POLL_INTERVAL_SEC", "2").strip() or "2"),
+        volcengine_poll_timeout_sec=int(os.getenv("VOLCENGINE_POLL_TIMEOUT_SEC", "120").strip() or "120"),
+        aliyun_oss_region=os.getenv("ALIYUN_OSS_REGION", "").strip(),
+        aliyun_oss_access_key_id=os.getenv("ALIYUN_OSS_ACCESS_KEY_ID", "").strip(),
+        aliyun_oss_access_key_secret=os.getenv("ALIYUN_OSS_ACCESS_KEY_SECRET", "").strip(),
+        aliyun_oss_bucket=os.getenv("ALIYUN_OSS_BUCKET", "").strip(),
+        aliyun_oss_public_domain=os.getenv("ALIYUN_OSS_PUBLIC_DOMAIN", "").strip(),
     )

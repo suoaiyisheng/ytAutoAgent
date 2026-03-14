@@ -109,6 +109,13 @@ def test_full_pipeline_contracts_and_alignment(tmp_path):
     assert aligned["storyboard"][1]["character_mappings"][0]["state_id"] == "human_form"
     assert aligned["storyboard"][2]["character_mappings"][0]["state_id"] is None
 
+    final_table = json.loads(Path(result["contracts"]["final_production_table"]).read_text(encoding="utf-8"))
+    first_bindings = final_table["prompts"][0]["reference_bindings"]
+    assert first_bindings[0]["reference_index"] == 1
+    assert first_bindings[0]["ref_id"] == "Ref_1"
+    assert first_bindings[0]["state_id"] == "human_form"
+    assert "state_text" in first_bindings[0]
+
 
 def test_job_state_flow_success_and_failure(build_client):
     success_client = build_client(FakeSuccessPipeline(result_scene_count=1, delay_sec=0.2))

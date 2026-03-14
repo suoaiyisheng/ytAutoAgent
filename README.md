@@ -32,6 +32,9 @@ cp .env.example .env
 - `POST /api/v1/stage1/jobs`: 提交完整流水线任务
 - `GET /api/v1/stage1/jobs/{task_id}`: 查询任务状态
 - `GET /api/v1/stage1/jobs/{task_id}/result`: 查询任务结果
+- `POST /api/v1/stage1/jobs/{task_id}/image-generation`: 启动生图任务
+- `GET /api/v1/stage1/jobs/{task_id}/image-generation`: 查询生图状态
+- `GET /api/v1/stage1/jobs/{task_id}/image-generation/result`: 查询生图结果
 - `GET /api/v1/health`: 健康检查
 
 提交任务示例（URL）：
@@ -62,6 +65,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/stage1/jobs \
 ```bash
 python -m app.cli run-full --source-url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 python -m app.cli run-full --local-video-path "/absolute/path/demo.mp4"
+python -m app.cli generate-images --job-id "your_job_id" --shot-range "1-3"
 ```
 
 ## 环境变量
@@ -82,3 +86,22 @@ python -m app.cli run-full --local-video-path "/absolute/path/demo.mp4"
 - `PIPELINE_RETRY_MAX`：模型调用重试次数（默认 `2`）
 - `PIPELINE_BATCH_SIZE`：Stage2 批大小（默认 `4`）
 - `STAGE1_DOTENV_PATH`：可选，指定 `.env` 文件路径
+- `IMAGE_GENERATION_PROVIDER`：生图提供方（`openrouter`/`volcengine_jimeng30`，默认 `openrouter`）
+- `OPENROUTER_API_KEY`：OpenRouter Key（生图）
+- `OPENROUTER_BASE_URL`：OpenRouter API Base URL（默认 `https://openrouter.ai/api/v1`）
+- `OPENROUTER_IMAGE_MODEL`：生图模型（默认 `google/gemini-2.5-flash-image`）
+- `VOLCENGINE_ACCESS_KEY_ID`：火山引擎 AccessKey ID（即梦3.0）
+- `VOLCENGINE_ACCESS_KEY_SECRET`：火山引擎 AccessKey Secret（即梦3.0）
+- `VOLCENGINE_SESSION_TOKEN`：可选，STS 临时凭证 Token
+- `VOLCENGINE_VISUAL_HOST`：即梦接口域名（默认 `visual.volcengineapi.com`）
+- `VOLCENGINE_REGION`：签名 Region（默认 `cn-north-1`）
+- `VOLCENGINE_SERVICE`：签名 Service（默认 `cv`）
+- `VOLCENGINE_JIMENG_REQ_KEY`：即梦文生图 req_key（默认 `jimeng_t2i_v30`）
+- `VOLCENGINE_JIMENG_VERSION`：接口版本（默认 `2022-08-31`）
+- `VOLCENGINE_POLL_INTERVAL_SEC`：查询轮询间隔秒数（默认 `2`）
+- `VOLCENGINE_POLL_TIMEOUT_SEC`：查询超时秒数（默认 `120`）
+- `ALIYUN_OSS_REGION`：阿里云 OSS Region
+- `ALIYUN_OSS_ACCESS_KEY_ID`：阿里云 OSS Access Key ID
+- `ALIYUN_OSS_ACCESS_KEY_SECRET`：阿里云 OSS Access Key Secret
+- `ALIYUN_OSS_BUCKET`：阿里云 OSS Bucket
+- `ALIYUN_OSS_PUBLIC_DOMAIN`：可选，OSS 自定义公网域名

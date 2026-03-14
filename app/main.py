@@ -13,12 +13,19 @@ from app.models import (
     ErrorDetail,
     HealthDependency,
     HealthResponse,
+    ImageGenerationCreateRequest,
+    ImageGenerationResult,
+    ImageGenerationResultResponse,
+    ImageGenerationStatusResponse,
+    ImageGenerationSubmitResponse,
     JobCreateRequest,
     JobResult,
     JobResultResponse,
     JobStatusResponse,
     JobSubmitResponse,
 )
+from app.services.image_generation import ImageGenerationService
+from app.services.image_generation_manager import ImageGenerationManager
 from app.services.job_manager import JobManager
 from app.services.pipeline import Stage1Pipeline
 from app.services.providers import (
@@ -42,6 +49,18 @@ def _to_status_response(task) -> JobStatusResponse:
         progress=round(task.progress, 2),
         created_at=task.created_at,
         updated_at=task.updated_at,
+        error=error,
+    )
+
+
+def _to_image_status_response(record) -> ImageGenerationStatusResponse:
+    error = ErrorDetail(**record.error) if record.error else None
+    return ImageGenerationStatusResponse(
+        task_id=record.task_id,
+        status=record.status,
+        progress=round(record.progress, 2),
+        created_at=record.created_at,
+        updated_at=record.updated_at,
         error=error,
     )
 
@@ -85,17 +104,25 @@ def build_manager(settings: Settings) -> JobManager:
 def create_app(settings: Settings | None = None, manager: JobManager | None = None) -> FastAPI:
     settings = settings or load_settings()
     manager = manager or build_manager(settings)
+    image_manager = ImageGenerationManager(
+        store=manager.store,
+        service=ImageGenerationService(store=manager.store, settings=settings),
+        max_workers=settings.max_workers,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         manager.start()
+        image_manager.start()
         try:
             yield
         finally:
+            image_manager.stop()
             manager.stop()
 
     app = FastAPI(title="ytAuto Full Pipeline API", version="0.2.0", lifespan=lifespan)
     app.state.manager = manager
+    app.state.image_manager = image_manager
 
     @app.exception_handler(Stage1Error)
     async def stage1_error_handler(_, exc: Stage1Error):
@@ -139,6 +166,46 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
 
         result = JobResult(**task.result)
         return JobResultResponse(task_id=task_id, status="succeeded", result=result)
+
+    @app.post(
+        "/api/v1/stage1/jobs/{task_id}/image-generation",
+        response_model=ImageGenerationSubmitResponse,
+    )
+    async def create_image_generation(
+        task_id: str,
+        payload: ImageGenerationCreateRequest | None = None,
+    ):
+        params = (payload or ImageGenerationCreateRequest()).model_dump()
+        record = app.state.image_manager.submit(task_id, params)
+        return ImageGenerationSubmitResponse(task_id=record.task_id, status="queued", created_at=record.created_at)
+
+    @app.get(
+        "/api/v1/stage1/jobs/{task_id}/image-generation",
+        response_model=ImageGenerationStatusResponse,
+    )
+    async def get_image_generation_status(task_id: str):
+        record = app.state.image_manager.get(task_id)
+        if not record:
+            raise _api_error("image_generation_not_found", "生图任务不存在", 404)
+        return _to_image_status_response(record)
+
+    @app.get(
+        "/api/v1/stage1/jobs/{task_id}/image-generation/result",
+        response_model=ImageGenerationResultResponse,
+    )
+    async def get_image_generation_result(task_id: str):
+        record = app.state.image_manager.get(task_id)
+        if not record:
+            raise _api_error("image_generation_not_found", "生图任务不存在", 404)
+        if record.status != "succeeded" or not record.result:
+            code = "result_not_ready"
+            message = "生图任务尚未完成"
+            if record.status == "failed" and record.error:
+                code = record.error.get("code", "result_not_ready")
+                message = record.error.get("message", "生图任务失败")
+            raise _api_error(code, message, 409)
+        result = ImageGenerationResult(**record.result)
+        return ImageGenerationResultResponse(task_id=task_id, status="succeeded", result=result)
 
     @app.get("/api/v1/health", response_model=HealthResponse)
     async def health():

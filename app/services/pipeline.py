@@ -940,10 +940,16 @@ class Stage1Pipeline:
         if not self.architect_prompt_path.exists():
             raise Stage1Error("prompt_template_missing", "缺少 V4.2 架构师提示词模板", 500)
 
+        expected_bindings = self._build_reference_bindings_by_shot(aligned_storyboard, character_bank)
+        stage4_storyboard = self._attach_reference_bindings_to_storyboard(
+            aligned_storyboard=aligned_storyboard,
+            bindings_by_shot=expected_bindings,
+        )
+
         architect_prompt = self.architect_prompt_path.read_text(encoding="utf-8")
         table = self.vlm_provider.generate_production_table(
             character_bank=character_bank,
-            aligned_storyboard=aligned_storyboard,
+            aligned_storyboard=stage4_storyboard,
             architect_prompt=architect_prompt,
             model=vlm_model,
             retry_max=retry_max,
@@ -956,10 +962,19 @@ class Stage1Pipeline:
 
         normalized_prompts = []
         for item in prompts:
+            shot_id = int(item.get("shot_id", 0))
+            expected = expected_bindings.get(shot_id, [])
+            actual = self._normalize_reference_bindings(item.get("reference_bindings"))
+            bindings = actual if self._reference_bindings_match(expected, actual) else expected
+            image_prompt = self._inject_state_text_into_image_prompt(
+                image_prompt=str(item.get("image_prompt", "")).strip(),
+                bindings=bindings,
+            )
             normalized_prompts.append(
                 {
-                    "shot_id": int(item.get("shot_id", 0)),
-                    "image_prompt": str(item.get("image_prompt", "")).strip(),
+                    "shot_id": shot_id,
+                    "reference_bindings": bindings,
+                    "image_prompt": image_prompt,
                     "video_prompt": str(item.get("video_prompt", "")).strip(),
                 }
             )
@@ -972,6 +987,121 @@ class Stage1Pipeline:
         progress_cb(92.0, "指令合成完成")
         self._assert_not_timeout(started_at)
         return table
+
+    def _build_reference_bindings_by_shot(
+        self,
+        aligned_storyboard: dict[str, Any],
+        character_bank: dict[str, Any],
+    ) -> dict[int, list[dict[str, Any]]]:
+        state_lookup = self._build_state_scene_lookup(character_bank.get("characters", []))
+        state_text_lookup = self._build_state_text_lookup(character_bank.get("characters", []))
+
+        by_shot: dict[int, list[dict[str, Any]]] = {}
+        for shot in aligned_storyboard.get("storyboard", []):
+            shot_id = int(shot.get("shot_id", 0))
+            bindings: list[dict[str, Any]] = []
+            for idx, mapping in enumerate(shot.get("character_mappings", []), start=1):
+                ref_id = str(mapping.get("ref_id", "")).strip()
+                raw_state = mapping.get("state_id")
+                state_id = str(raw_state).strip() if raw_state is not None else ""
+                if not state_id and ref_id:
+                    state_id = state_lookup.get((ref_id, shot_id), "")
+                bindings.append(
+                    {
+                        "reference_index": idx,
+                        "ref_id": ref_id,
+                        "state_id": state_id or None,
+                        "state_text": state_text_lookup.get((ref_id, state_id), "") if state_id else "",
+                    }
+                )
+            by_shot[shot_id] = bindings
+        return by_shot
+
+    def _build_state_text_lookup(self, characters: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+        lookup: dict[tuple[str, str], str] = {}
+        for character in characters:
+            ref_id = str(character.get("ref_id", "")).strip()
+            if not ref_id:
+                continue
+            states = character.get("states")
+            if not isinstance(states, list):
+                continue
+            for state in states:
+                state_id = str((state or {}).get("state_id", "")).strip()
+                if not state_id:
+                    continue
+                state_text = str((state or {}).get("description", "")).strip()
+                lookup[(ref_id, state_id)] = state_text
+        return lookup
+
+    def _attach_reference_bindings_to_storyboard(
+        self,
+        aligned_storyboard: dict[str, Any],
+        bindings_by_shot: dict[int, list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        storyboard = []
+        for shot in aligned_storyboard.get("storyboard", []):
+            shot_id = int(shot.get("shot_id", 0))
+            enriched = dict(shot)
+            enriched["reference_bindings"] = [dict(x) for x in bindings_by_shot.get(shot_id, [])]
+            storyboard.append(enriched)
+        return {
+            "project_id": aligned_storyboard.get("project_id", ""),
+            "storyboard": storyboard,
+        }
+
+    def _normalize_reference_bindings(self, raw: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                reference_index = int(item.get("reference_index", 0))
+            except (TypeError, ValueError):
+                continue
+            if reference_index <= 0:
+                continue
+            ref_id = str(item.get("ref_id", "")).strip()
+            state_raw = item.get("state_id")
+            state_id = str(state_raw).strip() if state_raw is not None else ""
+            normalized.append(
+                {
+                    "reference_index": reference_index,
+                    "ref_id": ref_id,
+                    "state_id": state_id or None,
+                    "state_text": str(item.get("state_text", "")).strip(),
+                }
+            )
+        return normalized
+
+    def _reference_bindings_match(self, expected: list[dict[str, Any]], actual: list[dict[str, Any]]) -> bool:
+        if len(expected) != len(actual):
+            return False
+        for exp, act in zip(expected, actual, strict=False):
+            if int(exp.get("reference_index", 0)) != int(act.get("reference_index", 0)):
+                return False
+            if str(exp.get("ref_id", "")) != str(act.get("ref_id", "")):
+                return False
+            if (exp.get("state_id") or None) != (act.get("state_id") or None):
+                return False
+        return True
+
+    def _inject_state_text_into_image_prompt(self, image_prompt: str, bindings: list[dict[str, Any]]) -> str:
+        text = image_prompt
+        for binding in bindings:
+            state_text = str(binding.get("state_text", "")).strip()
+            if not state_text:
+                continue
+            index = int(binding.get("reference_index", 0))
+            if index <= 0:
+                continue
+            pattern = rf"参考图{index}(?!（)"
+            repl = f"参考图{index}（{state_text}状态）"
+            text = re.sub(pattern, repl, text)
+        return text
 
     def _persist_index_and_result(
         self,

@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
+ImageJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
 class JobCreateRequest(BaseModel):
@@ -84,6 +85,42 @@ class HealthResponse(BaseModel):
     dependencies: dict[str, HealthDependency]
 
 
+class ImageGenerationCreateRequest(BaseModel):
+    shot_range: str | None = Field(default=None, min_length=1, max_length=200)
+    candidates_per_shot: int = Field(default=4, ge=1, le=32)
+    aspect_ratio: str = Field(default="9:16", min_length=1, max_length=20)
+    concurrency: int = Field(default=2, ge=1, le=16)
+
+
+class ImageGenerationSubmitResponse(BaseModel):
+    task_id: str
+    status: Literal["queued"]
+    created_at: datetime
+
+
+class ImageGenerationStatusResponse(BaseModel):
+    task_id: str
+    status: ImageJobStatus
+    progress: float
+    created_at: datetime
+    updated_at: datetime
+    error: ErrorDetail | None = None
+
+
+class ImageGenerationResult(BaseModel):
+    project_id: str
+    shot_count: int
+    total_candidates: int
+    failed_shots: list[dict[str, Any]]
+    artifacts: dict[str, str]
+
+
+class ImageGenerationResultResponse(BaseModel):
+    task_id: str
+    status: Literal["succeeded"]
+    result: ImageGenerationResult
+
+
 @dataclass
 class TaskRecord:
     task_id: str
@@ -129,4 +166,47 @@ class TaskRecord:
             result=payload.get("result"),
             working_dir=payload.get("working_dir", ""),
             logs=payload.get("logs", []),
+        )
+
+
+@dataclass
+class ImageGenerationRunRecord:
+    task_id: str
+    status: ImageJobStatus
+    created_at: datetime
+    updated_at: datetime
+    progress: float
+    params: dict[str, Any]
+    error: dict[str, str] | None = None
+    result: dict[str, Any] | None = None
+
+    @classmethod
+    def new(cls, task_id: str, params: dict[str, Any]) -> "ImageGenerationRunRecord":
+        now = datetime.now(timezone.utc)
+        return cls(
+            task_id=task_id,
+            status="queued",
+            created_at=now,
+            updated_at=now,
+            progress=0.0,
+            params=params,
+        )
+
+    def to_manifest(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["created_at"] = self.created_at.isoformat()
+        data["updated_at"] = self.updated_at.isoformat()
+        return data
+
+    @classmethod
+    def from_manifest(cls, payload: dict[str, Any]) -> "ImageGenerationRunRecord":
+        return cls(
+            task_id=payload["task_id"],
+            status=payload["status"],
+            created_at=datetime.fromisoformat(payload["created_at"]),
+            updated_at=datetime.fromisoformat(payload["updated_at"]),
+            progress=float(payload.get("progress", 0.0)),
+            params=payload.get("params", {}),
+            error=payload.get("error"),
+            result=payload.get("result"),
         )
