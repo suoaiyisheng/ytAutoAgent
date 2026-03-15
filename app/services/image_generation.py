@@ -148,12 +148,14 @@ class OpenRouterImageClient:
         api_key: str,
         base_url: str,
         model: str,
+        add_watermark: bool = False,
         retry_max: int = 2,
         timeout_sec: int = 90,
     ) -> None:
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
         self.model = model.strip()
+        self.add_watermark = bool(add_watermark)
         self.retry_max = max(0, retry_max)
         self.timeout_sec = timeout_sec
 
@@ -295,7 +297,10 @@ class OpenRouterImageClient:
             "model": self.model,
             "modalities": ["image", "text"],
             "messages": [{"role": "user", "content": content}],
-            "image": {"aspect_ratio": aspect_ratio},
+            "image_config": {
+                "aspect_ratio": aspect_ratio,
+                "add_watermark": self.add_watermark,
+            },
         }
 
     def _request_with_image_compat(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +311,7 @@ class OpenRouterImageClient:
             if exc.status in {400, 422} and "image" in low and "model id" not in low:
                 fallback_payload = dict(payload)
                 fallback_payload.pop("image", None)
+                fallback_payload.pop("image_config", None)
                 return self._request(fallback_payload)
             raise
 
@@ -711,6 +717,7 @@ class ImageGenerationService:
             api_key=self.settings.openrouter_api_key,
             base_url=self.settings.openrouter_base_url,
             model=self.settings.openrouter_image_model,
+            add_watermark=self.settings.openrouter_image_add_watermark,
             retry_max=2,
         )
 
@@ -789,31 +796,19 @@ class ImageGenerationService:
                 continue
             prompt_by_shot[sid] = item
 
+        storyboard_shots = self._normalize_aligned_storyboard_shots(aligned_storyboard)
         tasks = []
-        for shot in aligned_storyboard.get("storyboard", []):
+        for shot in storyboard_shots:
             shot_id = int(shot.get("shot_id", 0))
             prompt_item = prompt_by_shot.get(shot_id, {})
-            bindings = prompt_item.get("reference_bindings")
-            binding_by_index: dict[int, dict[str, Any]] = {}
-            if isinstance(bindings, list):
-                for b in bindings:
-                    try:
-                        idx = int((b or {}).get("reference_index", 0))
-                    except (TypeError, ValueError):
-                        continue
-                    if idx > 0:
-                        binding_by_index[idx] = b
 
             references = []
             for idx, mapping in enumerate(shot.get("character_mappings", []), start=1):
                 ref_id = str(mapping.get("ref_id", "")).strip()
-                binding = binding_by_index.get(idx, {})
                 references.append(
                     {
                         "reference_index": idx,
                         "ref_id": ref_id,
-                        "state_id": binding.get("state_id"),
-                        "state_text": str(binding.get("state_text", "")).strip(),
                         "image_path": ref_path_by_id.get(ref_id, ""),
                     }
                 )
@@ -835,6 +830,32 @@ class ImageGenerationService:
         }
         self.store.write_json(path, payload)
         return payload
+
+    def _normalize_aligned_storyboard_shots(self, aligned_storyboard: dict[str, Any]) -> list[dict[str, Any]]:
+        storyboard_payload = aligned_storyboard.get("storyboard")
+        if isinstance(storyboard_payload, list):
+            return storyboard_payload
+
+        scenes_payload = aligned_storyboard.get("scenes")
+        if not isinstance(scenes_payload, list):
+            return []
+
+        shots: list[dict[str, Any]] = []
+        for scene in scenes_payload:
+            try:
+                shot_id = int(scene.get("scene_id", 0))
+            except (TypeError, ValueError):
+                continue
+            subjects = (scene.get("visual_analysis") or {}).get("subjects") or []
+            character_mappings = []
+            for subject in subjects:
+                ref_id = str((subject or {}).get("id", "")).strip()
+                if not ref_id:
+                    continue
+                character_mappings.append({"ref_id": ref_id})
+            shots.append({"shot_id": shot_id, "character_mappings": character_mappings})
+
+        return sorted(shots, key=lambda x: int(x.get("shot_id", 0)))
 
     def _download_candidate_url(self, url: str, timeout_sec: int = 60) -> tuple[bytes, str]:
         request = urllib.request.Request(url=url, method="GET")
@@ -892,8 +913,6 @@ class ImageGenerationService:
                 {
                     "reference_index": int((ref or {}).get("reference_index", 0)),
                     "ref_id": ref_id,
-                    "state_id": (ref or {}).get("state_id"),
-                    "state_text": str((ref or {}).get("state_text", "")).strip(),
                     "image_path": str((ref or {}).get("image_path", "")).strip(),
                     "oss_url": oss_url_by_ref.get(ref_id, ""),
                 }

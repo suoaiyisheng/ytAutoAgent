@@ -218,8 +218,8 @@ def test_service_generates_only_first_three_shots(tmp_path):
         {
             "project_id": task_id,
             "characters": [
-                {"ref_id": "Ref_1", "ref_image_path": str(ref1), "states": []},
-                {"ref_id": "Ref_2", "ref_image_path": str(ref2), "states": []},
+                {"ref_id": "Ref_1", "ref_image_path": str(ref1), "scene_presence": [1, 2, 4]},
+                {"ref_id": "Ref_2", "ref_image_path": str(ref2), "scene_presence": [1, 3]},
             ],
         },
     )
@@ -296,7 +296,91 @@ def test_service_generates_only_first_three_shots(tmp_path):
     assert [int(x["shot_id"]) for x in payload["shots"]] == [1, 2, 3]
     for shot in payload["shots"]:
         assert len(shot["candidates"]) == 8
+        for ref in shot["reference_images"]:
+            assert "state_id" not in ref
+            assert "state_text" not in ref
         for item in shot["candidates"]:
             assert Path(item["local_path"]).exists()
     assert not (task_dir / "outputs" / "images" / "shot_004").exists()
     assert any("镜头 3 生图完成" in msg for _, msg in progress)
+
+
+def test_generation_inputs_ignore_legacy_state_fields(tmp_path):
+    settings = _settings(tmp_path)
+    store = TaskStore(settings.data_dir)
+    task_id = "job_legacy_state"
+    task_dir = store.task_dir(task_id)
+
+    ref1 = task_dir / "ref1.jpg"
+    ref1.write_bytes(b"ref1")
+    keyframe = task_dir / "frame_001.jpg"
+    clip = task_dir / "clip_001.mp4"
+    keyframe.write_bytes(b"frame1")
+    clip.write_bytes(b"clip1")
+
+    store.write_json(
+        store.contract_path(task_id, "physical_manifest"),
+        {
+            "project_id": task_id,
+            "scenes": [{"scene_id": 1, "keyframe_path": str(keyframe), "clip_path": str(clip)}],
+        },
+    )
+    store.write_json(
+        store.contract_path(task_id, "character_bank"),
+        {"project_id": task_id, "characters": [{"ref_id": "Ref_1", "ref_image_path": str(ref1)}]},
+    )
+    store.write_json(
+        store.contract_path(task_id, "aligned_storyboard"),
+        {
+            "project_id": task_id,
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "visual_analysis": {
+                        "subjects": [
+                            {
+                                "id": "Ref_1",
+                                "appearance": "女性，偏胖，紫色长辫子",
+                                "action": "站立",
+                                "expression": "平静",
+                            },
+                            {
+                                "id": "",
+                                "appearance": "背景路人",
+                                "action": "路过",
+                                "expression": "模糊",
+                            },
+                        ],
+                        "environment": {"location": "室内", "lighting": "明亮", "atmosphere": "自然"},
+                        "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
+                    },
+                }
+            ],
+        },
+    )
+    store.write_json(
+        store.contract_path(task_id, "final_production_table"),
+        {
+            "project_id": task_id,
+            "prompts": [
+                {
+                    "shot_id": 1,
+                    "reference_bindings": [
+                        {
+                            "reference_index": 1,
+                            "ref_id": "Ref_1",
+                            "state_id": "legacy_state",
+                            "state_text": "历史状态",
+                        }
+                    ],
+                    "image_prompt": "参考图1",
+                    "video_prompt": "固定镜头",
+                }
+            ],
+        },
+    )
+
+    service = ImageGenerationService(store=store, settings=settings)
+    payload = service._load_or_build_generation_inputs(task_id)  # noqa: SLF001
+    refs = payload["tasks"][0]["reference_images"]
+    assert refs == [{"reference_index": 1, "ref_id": "Ref_1", "image_path": str(ref1)}]

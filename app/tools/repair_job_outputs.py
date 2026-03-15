@@ -16,6 +16,18 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _scene_id_from_presence_item(item: Any) -> int | None:
+    raw = item
+    if isinstance(item, (list, tuple)):
+        if not item:
+            return None
+        raw = item[0]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_state_scene_lookup(characters: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
     lookup: dict[tuple[str, int], str] = {}
     for character in characters:
@@ -180,9 +192,8 @@ def _select_unique_ref_image_paths(
             for sid in (next((c for c in characters if str(c.get("ref_id", "")).strip() == ref_id), {}) or {}).get(
                 "scene_presence", []
             ):
-                try:
-                    scene_id = int(sid)
-                except (TypeError, ValueError):
+                scene_id = _scene_id_from_presence_item(sid)
+                if scene_id is None:
                     continue
                 keyframe = scene_assets.get(scene_id, {}).get("keyframe_path", "")
                 if keyframe:

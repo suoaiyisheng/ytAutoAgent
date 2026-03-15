@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--embed-model", default=None)
     run.add_argument("--batch-size", type=int, default=None)
     run.add_argument("--retry-max", type=int, default=None)
+    run.add_argument("--stage5-dump-path", default=None)
 
     gen = sub.add_parser("generate-images", help="运行生图阶段（OSS+模型提供方）")
     gen.add_argument("--job-id", required=True)
@@ -106,6 +107,7 @@ def run_full(args: argparse.Namespace) -> int:
         "embed_model": args.embed_model,
         "batch_size": args.batch_size,
         "retry_max": args.retry_max,
+        "stage5_dump_path": args.stage5_dump_path,
     }
 
     task = TaskRecord.new(task_id=task_id, params=params, working_dir=working_dir)

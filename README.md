@@ -90,6 +90,7 @@ python -m app.cli generate-images --job-id "your_job_id" --shot-range "1-3"
 - `OPENROUTER_API_KEY`：OpenRouter Key（生图）
 - `OPENROUTER_BASE_URL`：OpenRouter API Base URL（默认 `https://openrouter.ai/api/v1`）
 - `OPENROUTER_IMAGE_MODEL`：生图模型（默认 `google/gemini-2.5-flash-image`）
+- `OPENROUTER_IMAGE_ADD_WATERMARK`：是否添加可配置水印（`true`/`false`，默认 `false`）
 - `VOLCENGINE_ACCESS_KEY_ID`：火山引擎 AccessKey ID（即梦3.0）
 - `VOLCENGINE_ACCESS_KEY_SECRET`：火山引擎 AccessKey Secret（即梦3.0）
 - `VOLCENGINE_SESSION_TOKEN`：可选，STS 临时凭证 Token

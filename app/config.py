@@ -41,6 +41,7 @@ class Settings:
     aliyun_oss_access_key_secret: str
     aliyun_oss_bucket: str
     aliyun_oss_public_domain: str
+    openrouter_image_add_watermark: bool = False
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -97,6 +98,9 @@ def load_settings() -> Settings:
     if image_generation_provider not in {"openrouter", "volcengine_jimeng30"}:
         image_generation_provider = "openrouter"
 
+    openrouter_image_add_watermark_raw = os.getenv("OPENROUTER_IMAGE_ADD_WATERMARK", "false").strip().lower()
+    openrouter_image_add_watermark = openrouter_image_add_watermark_raw in {"1", "true", "yes", "on"}
+
     return Settings(
         data_dir=data_dir,
         max_workers=max_workers,
@@ -131,6 +135,7 @@ def load_settings() -> Settings:
         or "https://openrouter.ai/api/v1",
         openrouter_image_model=os.getenv("OPENROUTER_IMAGE_MODEL", "google/gemini-2.5-flash-image").strip()
         or "google/gemini-2.5-flash-image",
+        openrouter_image_add_watermark=openrouter_image_add_watermark,
         volcengine_access_key_id=os.getenv("VOLCENGINE_ACCESS_KEY_ID", "").strip(),
         volcengine_access_key_secret=os.getenv("VOLCENGINE_ACCESS_KEY_SECRET", "").strip(),
         volcengine_session_token=os.getenv("VOLCENGINE_SESSION_TOKEN", "").strip(),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -324,7 +325,11 @@ class Stage1Pipeline:
                 "characters": [],
                 "global_style": "真实摄影风格",
             }
-            aligned_storyboard = self._build_aligned_storyboard(raw_scene_descriptions, {}, {})
+            aligned_storyboard = self._build_aligned_storyboard(
+                raw_scene_descriptions,
+                {},
+                character_bank.get("characters", []),
+            )
             self.store.write_contract(task.task_id, "character_bank", character_bank)
             self.store.write_contract(task.task_id, "aligned_storyboard", aligned_storyboard)
             return character_bank, aligned_storyboard
@@ -363,8 +368,7 @@ class Stage1Pipeline:
             "characters": main_characters,
             "global_style": "真实摄影风格",
         }
-        state_lookup = self._build_state_scene_lookup(main_characters)
-        aligned_storyboard = self._build_aligned_storyboard(raw_scene_descriptions, mapping, state_lookup)
+        aligned_storyboard = self._build_aligned_storyboard(raw_scene_descriptions, mapping, main_characters)
 
         self.store.write_contract(task.task_id, "character_bank", character_bank)
         self.store.write_contract(task.task_id, "aligned_storyboard", aligned_storyboard)
@@ -478,8 +482,12 @@ class Stage1Pipeline:
             master_description = self._merge_appearances(appearances)
             key_features = self._derive_key_features(master_description)
             ref_image = cluster["members"][0].get("keyframe_path", "")
-            states = self._build_cluster_states(cluster["members"])
             confidence = round(self._mean(cluster.get("assignment_scores") or [0.0]), 3)
+            scene_presence: set[tuple[int, str]] = set()
+            for member in cluster["members"]:
+                scene_id = int(member.get("scene_id", 0))
+                temp_id = str(member.get("temp_id", "")).strip()
+                scene_presence.add((scene_id, temp_id))
 
             characters.append(
                 {
@@ -488,10 +496,9 @@ class Stage1Pipeline:
                     "master_description": master_description,
                     "key_features": key_features,
                     "ref_image_path": ref_image,
-                    "states": states,
                     "needs_review": bool(cluster.get("needs_review", False)),
                     "merge_confidence": confidence,
-                    "scene_presence": sorted({int(m["scene_id"]) for m in cluster["members"]}),
+                    "scene_presence": [[sid, pid] for sid, pid in sorted(scene_presence, key=lambda x: (x[0], x[1]))],
                 }
             )
 
@@ -526,49 +533,265 @@ class Stage1Pipeline:
     def _public_character_record(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
             "ref_id": item["ref_id"],
-            "name": item.get("name", ""),
-            "master_description": item.get("master_description", ""),
-            "key_features": item.get("key_features", []),
+            "name": str(item.get("name", "")).strip(),
+            "master_description": str(item.get("master_description", "")).strip(),
+            "key_features": [str(x).strip() for x in item.get("key_features", []) if str(x).strip()],
             "ref_image_path": item.get("ref_image_path", ""),
-            "states": item.get("states", []),
-            "merge_confidence": item.get("merge_confidence", 0.0),
-            "scene_presence": item.get("scene_presence", []),
+            "scene_presence": self._normalize_scene_presence(item.get("scene_presence", [])),
         }
 
     def _build_aligned_storyboard(
         self,
         raw_scene_descriptions: dict[str, Any],
         mapping: dict[tuple[int, str], str],
-        state_lookup: dict[tuple[str, int], str],
+        characters: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        shots: list[dict[str, Any]] = []
+        profiles = self._build_character_description_profiles(characters or [])
+        scenes: list[dict[str, Any]] = []
         for scene in sorted(raw_scene_descriptions.get("scenes", []), key=lambda x: int(x.get("scene_id", 0))):
             sid = int(scene.get("scene_id", 0))
             va = scene.get("visual_analysis", {})
             subjects = va.get("subjects", [])
 
-            char_mappings = []
+            aligned_subjects: list[dict[str, Any]] = []
             for subject in subjects:
                 temp_id = str(subject.get("temp_id", "")).strip()
-                expression = str(subject.get("expression", "")).strip()
-                ref_id = mapping.get((sid, temp_id), temp_id)
-                char_mappings.append(
+                ref_id = str(mapping.get((sid, temp_id), "")).strip()
+                if not ref_id:
+                    ref_id = self._match_subject_to_character(
+                        scene_id=sid,
+                        subject=subject,
+                        profiles=profiles,
+                    )
+                aligned_subjects.append(
                     {
-                        "ref_id": ref_id,
-                        "state_id": state_lookup.get((str(ref_id), sid)),
-                        "action_in_shot": str(subject.get("action", "")).strip(),
-                        "expression_range": [expression, expression],
+                        "id": ref_id,
+                        "appearance": str(subject.get("appearance", "")).strip(),
+                        "action": str(subject.get("action", "")).strip(),
+                        "expression": str(subject.get("expression", "")).strip(),
                     }
                 )
 
             env = va.get("environment", {})
             camera = va.get("camera", {})
+            scenes.append(
+                {
+                    "scene_id": sid,
+                    "visual_analysis": {
+                        "subjects": aligned_subjects,
+                        "environment": {
+                            "location": str(env.get("location", "")).strip(),
+                            "lighting": str(env.get("lighting", "")).strip(),
+                            "atmosphere": str(env.get("atmosphere", "")).strip(),
+                        },
+                        "camera": {
+                            "shot_size": str(camera.get("shot_size", "")).strip(),
+                            "angle": str(camera.get("angle", "")).strip(),
+                            "movement": str(camera.get("movement", "")).strip(),
+                        },
+                    },
+                }
+            )
+
+        return {
+            "project_id": raw_scene_descriptions.get("project_id", ""),
+            "scenes": scenes,
+        }
+
+    def _build_character_description_profiles(self, characters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        profiles: list[dict[str, Any]] = []
+        for item in characters:
+            ref_id = str(item.get("ref_id", "")).strip()
+            if not ref_id:
+                continue
+
+            scene_presence: set[int] = set()
+            for presence in item.get("scene_presence", []):
+                scene_id = self._scene_id_from_scene_presence(presence)
+                if scene_id is not None:
+                    scene_presence.add(scene_id)
+
+            description_parts: list[str] = []
+            for value in [
+                str(item.get("name", "")).strip(),
+                str(item.get("master_description", "")).strip(),
+            ]:
+                if value:
+                    description_parts.append(value)
+            for feature in item.get("key_features", []):
+                text = str(feature).strip()
+                if text:
+                    description_parts.append(text)
+
+            description = "，".join(description_parts)
+            features = self._parse_subject_features(appearance=description, action="")
+            profiles.append(
+                {
+                    "ref_id": ref_id,
+                    "scene_presence": scene_presence,
+                    "anchors": set(features.get("anchors", [])),
+                    "tokens": self._description_tokens(description),
+                    "gender": str(features.get("gender", "unknown")),
+                    "role": str(features.get("role", "human")),
+                }
+            )
+        return profiles
+
+    def _match_subject_to_character(
+        self,
+        scene_id: int,
+        subject: dict[str, Any],
+        profiles: list[dict[str, Any]],
+    ) -> str:
+        if not profiles:
+            return ""
+
+        scene_candidates = [item for item in profiles if scene_id in item.get("scene_presence", set())]
+        candidates = scene_candidates or profiles
+
+        appearance = str(subject.get("appearance", "")).strip()
+        action = str(subject.get("action", "")).strip()
+        features = self._parse_subject_features(appearance=appearance, action=action)
+        subject_anchors = set(features.get("anchors", []))
+        subject_tokens = self._description_tokens(f"{appearance} {action}".strip())
+
+        subject_gender = str(features.get("gender", "unknown"))
+        subject_role = str(features.get("role", "human"))
+
+        best_ref = ""
+        best_score = 0.0
+        for item in candidates:
+            score = (0.65 * self._jaccard(subject_anchors, item.get("anchors", set()))) + (
+                0.35 * self._jaccard(subject_tokens, item.get("tokens", set()))
+            )
+            if scene_id in item.get("scene_presence", set()):
+                score += 0.05
+
+            candidate_gender = str(item.get("gender", "unknown"))
+            candidate_role = str(item.get("role", "human"))
+            if (
+                subject_gender != "unknown"
+                and candidate_gender != "unknown"
+                and subject_gender != candidate_gender
+            ):
+                score -= 0.25
+            if {"doctor", "mermaid"} <= {subject_role, candidate_role}:
+                score -= 0.2
+
+            if score > best_score:
+                best_score = score
+                best_ref = str(item.get("ref_id", "")).strip()
+
+        if best_score < 0.18:
+            return ""
+        return best_ref
+
+    def _description_tokens(self, text: str) -> set[str]:
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return set()
+        parts = re.split(r"[，,。；;、\s/（）()]+", normalized)
+        return {part for part in parts if len(part) >= 2}
+
+    def _scene_id_from_scene_presence(self, presence: Any) -> int | None:
+        raw = presence
+        if isinstance(presence, (list, tuple)):
+            if not presence:
+                return None
+            raw = presence[0]
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_scene_presence(self, raw_presence: Any) -> list[list[Any]]:
+        if not isinstance(raw_presence, list):
+            return []
+        normalized: set[tuple[int, str]] = set()
+        for item in raw_presence:
+            if isinstance(item, (list, tuple)):
+                if not item:
+                    continue
+                scene_id = self._scene_id_from_scene_presence(item)
+                if scene_id is None:
+                    continue
+                person_id = str(item[1]).strip() if len(item) > 1 else ""
+                normalized.add((scene_id, person_id))
+                continue
+            scene_id = self._scene_id_from_scene_presence(item)
+            if scene_id is None:
+                continue
+            normalized.add((scene_id, ""))
+        return [[scene_id, person_id] for scene_id, person_id in sorted(normalized, key=lambda x: (x[0], x[1]))]
+
+    def _project_aligned_storyboard_to_stage4_storyboard(
+        self,
+        aligned_storyboard: dict[str, Any],
+    ) -> dict[str, Any]:
+        storyboard_payload = aligned_storyboard.get("storyboard")
+        if isinstance(storyboard_payload, list):
+            normalized_storyboard: list[dict[str, Any]] = []
+            for shot in storyboard_payload:
+                shot_id = int(shot.get("shot_id", 0))
+                mappings = []
+                for mapping in shot.get("character_mappings", []):
+                    ref_id = str(mapping.get("ref_id", "")).strip()
+                    if ref_id:
+                        normalized_mapping: dict[str, Any] = {"ref_id": ref_id}
+                        appearance = str(mapping.get("appearance", "")).strip()
+                        action_in_shot = str(mapping.get("action_in_shot", "")).strip()
+                        expression_range = self._normalize_expression_range(mapping.get("expression_range"))
+                        if appearance:
+                            normalized_mapping["appearance"] = appearance
+                        if action_in_shot:
+                            normalized_mapping["action_in_shot"] = action_in_shot
+                        if expression_range:
+                            normalized_mapping["expression_range"] = expression_range
+                        mappings.append(normalized_mapping)
+                normalized_storyboard.append(
+                    {
+                        "shot_id": shot_id,
+                        "character_mappings": mappings,
+                        "environment_context": str(shot.get("environment_context", "")).strip(),
+                        "camera_instruction": str(shot.get("camera_instruction", "")).strip(),
+                    }
+                )
+            return {
+                "project_id": aligned_storyboard.get("project_id", ""),
+                "storyboard": sorted(normalized_storyboard, key=lambda x: int(x.get("shot_id", 0))),
+            }
+
+        scenes_payload = aligned_storyboard.get("scenes")
+        if not isinstance(scenes_payload, list):
+            return {"project_id": aligned_storyboard.get("project_id", ""), "storyboard": []}
+
+        storyboard: list[dict[str, Any]] = []
+        for scene in sorted(scenes_payload, key=lambda x: int(x.get("scene_id", 0))):
+            scene_id = int(scene.get("scene_id", 0))
+            va = scene.get("visual_analysis", {})
+            subjects = va.get("subjects", [])
+
+            char_mappings: list[dict[str, Any]] = []
+            for subject in subjects:
+                ref_id = str(subject.get("id", "")).strip()
+                if ref_id:
+                    mapping = {
+                        "ref_id": ref_id,
+                        "appearance": str(subject.get("appearance", "")).strip(),
+                        "action_in_shot": str(subject.get("action", "")).strip(),
+                    }
+                    expression = str(subject.get("expression", "")).strip()
+                    if expression:
+                        mapping["expression_range"] = [expression]
+                    char_mappings.append(mapping)
+
+            env = va.get("environment", {})
+            camera = va.get("camera", {})
             env_text = "，".join([x for x in [env.get("location", ""), env.get("lighting", ""), env.get("atmosphere", "")] if x])
             cam_text = "，".join([x for x in [camera.get("shot_size", ""), camera.get("angle", ""), camera.get("movement", "")] if x])
-
-            shots.append(
+            storyboard.append(
                 {
-                    "shot_id": sid,
+                    "shot_id": scene_id,
                     "character_mappings": char_mappings,
                     "environment_context": env_text,
                     "camera_instruction": cam_text,
@@ -576,35 +799,49 @@ class Stage1Pipeline:
             )
 
         return {
-            "project_id": raw_scene_descriptions.get("project_id", ""),
-            "storyboard": shots,
+            "project_id": aligned_storyboard.get("project_id", ""),
+            "storyboard": storyboard,
         }
 
-    def _build_state_scene_lookup(self, characters: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
-        lookup: dict[tuple[str, int], str] = {}
-        for character in characters:
-            ref_id = str(character.get("ref_id", "")).strip()
+    def _build_stage5_generation_input(
+        self,
+        *,
+        aligned_storyboard: dict[str, Any],
+        stage4_storyboard: dict[str, Any],
+        character_bank: dict[str, Any],
+        ref_image_url_by_id: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        ref_image_url_by_id = ref_image_url_by_id or {}
+        ref_catalog = []
+        for item in character_bank.get("characters", []):
+            ref_id = str(item.get("ref_id", "")).strip()
             if not ref_id:
                 continue
-            states = character.get("states")
-            if not isinstance(states, list):
-                continue
+            ref_path = str(item.get("ref_image_path", "")).strip()
+            ref_image_url = str(ref_image_url_by_id.get(ref_id, "")).strip()
+            ref_catalog.append(
+                {
+                    "ref_id": ref_id,
+                    "ref_image_path": ref_path,
+                    "ref_image_url": ref_image_url,
+                    "scene_presence": item.get("scene_presence", []),
+                }
+            )
 
-            for state in states:
-                state_id = str((state or {}).get("state_id", "")).strip()
-                if not state_id:
-                    continue
-                scene_presence = (state or {}).get("scene_presence") or []
-                for sid in scene_presence:
-                    try:
-                        scene_id = int(sid)
-                    except (TypeError, ValueError):
-                        continue
-                    key = (ref_id, scene_id)
-                    if key not in lookup:
-                        # 若异常重复映射，保持首次命中的 state_id，确保输出稳定。
-                        lookup[key] = state_id
-        return lookup
+        return {
+            "project_id": stage4_storyboard.get("project_id", "") or aligned_storyboard.get("project_id", ""),
+            "storyboard": [dict(x) for x in stage4_storyboard.get("storyboard", [])],
+            "reference_catalog": ref_catalog,
+        }
+
+    def _normalize_expression_range(self, raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text:
+                return [text]
+        return []
 
     def _parse_subject_features(self, appearance: str, action: str) -> dict[str, Any]:
         text = self._normalize_text(f"{appearance} {action}")
@@ -855,28 +1092,77 @@ class Stage1Pipeline:
             if state_id not in grouped:
                 grouped[state_id] = {
                     "scene_presence": set(),
-                    "description": "",
-                    "first_scene": 10**9,
+                    "candidates": [],
                 }
 
             scene_id = int(member.get("scene_id", 0))
             grouped[state_id]["scene_presence"].add(scene_id)
-
-            appearance = str(member.get("appearance", "")).strip()
-            if appearance and scene_id <= grouped[state_id]["first_scene"]:
-                grouped[state_id]["first_scene"] = scene_id
-                grouped[state_id]["description"] = appearance
+            grouped[state_id]["candidates"].append(
+                {
+                    "scene_id": scene_id,
+                    "appearance": str(member.get("appearance", "")).strip(),
+                    "appearance_norm": str(member.get("appearance_norm", "")).strip(),
+                }
+            )
 
         states: list[dict[str, Any]] = []
         for state_id, info in grouped.items():
+            description = self._pick_state_description(
+                state_id=state_id,
+                candidates=info.get("candidates") or [],
+            )
             states.append(
                 {
                     "state_id": state_id,
                     "scene_presence": sorted(info["scene_presence"]),
-                    "description": str(info["description"]).strip(),
+                    "description": description,
                 }
             )
         return sorted(states, key=lambda x: x["state_id"])
+
+    def _pick_state_description(self, state_id: str, candidates: list[dict[str, Any]]) -> str:
+        if not candidates:
+            return ""
+
+        expects_mermaid = state_id.startswith("mermaid_")
+        expects_human = state_id.startswith("human_")
+
+        def _role_match_score(item: dict[str, Any]) -> int:
+            appearance = str(item.get("appearance", "")).strip()
+            appearance_norm = str(item.get("appearance_norm", "")).strip()
+            has_mermaid = self._contains_mermaid_token(appearance) or self._contains_mermaid_token(appearance_norm)
+            if expects_mermaid:
+                return 1 if has_mermaid else 0
+            if expects_human:
+                return 1 if not has_mermaid else 0
+            return 1
+
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda x: (
+                -_role_match_score(x),
+                int(x.get("scene_id", 10**9)),
+            ),
+        )
+        chosen = sorted_candidates[0]
+        description = str(chosen.get("appearance", "")).strip() or str(chosen.get("appearance_norm", "")).strip()
+        return self._force_state_role_hint(state_id=state_id, description=description)
+
+    def _contains_mermaid_token(self, text: str) -> bool:
+        lower = text.lower()
+        return any(token in lower for token in ["鱼尾", "美人鱼", "人鱼", "mermaid"])
+
+    def _force_state_role_hint(self, state_id: str, description: str) -> str:
+        text = description.strip()
+        if not text:
+            return text
+
+        has_mermaid = self._contains_mermaid_token(text)
+        if state_id.startswith("mermaid_") and not has_mermaid:
+            return f"{text}，下半身为鱼尾（美人鱼形态）"
+        if state_id.startswith("human_") and has_mermaid:
+            return f"{text}（人类形态）"
+        return text
 
     def _infer_state(self, member: dict[str, Any]) -> str:
         text = str(member.get("appearance_norm") or member.get("appearance") or "").lower()
@@ -940,20 +1226,33 @@ class Stage1Pipeline:
         if not self.architect_prompt_path.exists():
             raise Stage1Error("prompt_template_missing", "缺少 V4.2 架构师提示词模板", 500)
 
-        expected_bindings = self._build_reference_bindings_by_shot(aligned_storyboard, character_bank)
+        stage4_base_storyboard = self._project_aligned_storyboard_to_stage4_storyboard(aligned_storyboard)
+        expected_bindings = self._build_reference_bindings_by_shot(stage4_base_storyboard)
         stage4_storyboard = self._attach_reference_bindings_to_storyboard(
-            aligned_storyboard=aligned_storyboard,
+            aligned_storyboard=stage4_base_storyboard,
             bindings_by_shot=expected_bindings,
+        )
+        ref_image_url_by_id = self._load_ref_image_url_map(task.task_id)
+        stage5_input = self._build_stage5_generation_input(
+            aligned_storyboard=aligned_storyboard,
+            stage4_storyboard=stage4_storyboard,
+            character_bank=character_bank,
+            ref_image_url_by_id=ref_image_url_by_id,
         )
 
         architect_prompt = self.architect_prompt_path.read_text(encoding="utf-8")
+        stage5_dump_path = str(params.get("stage5_dump_path", "") or "").strip()
+        debug_context: dict[str, Any] | None = {} if stage5_dump_path else None
         table = self.vlm_provider.generate_production_table(
             character_bank=character_bank,
-            aligned_storyboard=stage4_storyboard,
+            aligned_storyboard=stage5_input,
             architect_prompt=architect_prompt,
             model=vlm_model,
             retry_max=retry_max,
+            debug_context=debug_context,
         )
+        if isinstance(debug_context, dict):
+            debug_context["provider_table_output"] = json.loads(json.dumps(table, ensure_ascii=False))
         table["project_id"] = task.task_id
 
         prompts = table.get("prompts") or []
@@ -966,19 +1265,22 @@ class Stage1Pipeline:
             expected = expected_bindings.get(shot_id, [])
             actual = self._normalize_reference_bindings(item.get("reference_bindings"))
             bindings = actual if self._reference_bindings_match(expected, actual) else expected
-            image_prompt = self._inject_state_text_into_image_prompt(
-                image_prompt=str(item.get("image_prompt", "")).strip(),
-                bindings=bindings,
-            )
             normalized_prompts.append(
                 {
                     "shot_id": shot_id,
                     "reference_bindings": bindings,
-                    "image_prompt": image_prompt,
+                    "image_prompt": str(item.get("image_prompt", "")).strip(),
                     "video_prompt": str(item.get("video_prompt", "")).strip(),
                 }
             )
         table["prompts"] = normalized_prompts
+        if isinstance(debug_context, dict):
+            self._dump_stage5_context(
+                task_id=task.task_id,
+                raw_path=stage5_dump_path,
+                debug_context=debug_context,
+                final_table=table,
+            )
 
         self.store.write_contract(task.task_id, "final_production_table", table)
         md = self._to_markdown_table(normalized_prompts)
@@ -988,51 +1290,47 @@ class Stage1Pipeline:
         self._assert_not_timeout(started_at)
         return table
 
+    def _load_ref_image_url_map(self, task_id: str) -> dict[str, str]:
+        path = self.store.ref_oss_map_path(task_id)
+        if not path.exists():
+            return {}
+        try:
+            payload = self.store.read_json(path)
+        except Exception:  # noqa: BLE001
+            return {}
+
+        refs = payload.get("refs")
+        if not isinstance(refs, list):
+            return {}
+
+        ref_image_url_by_id: dict[str, str] = {}
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("ref_id", "")).strip()
+            oss_url = str(item.get("oss_url", "")).strip()
+            if ref_id and oss_url:
+                ref_image_url_by_id[ref_id] = oss_url
+        return ref_image_url_by_id
+
     def _build_reference_bindings_by_shot(
         self,
         aligned_storyboard: dict[str, Any],
-        character_bank: dict[str, Any],
     ) -> dict[int, list[dict[str, Any]]]:
-        state_lookup = self._build_state_scene_lookup(character_bank.get("characters", []))
-        state_text_lookup = self._build_state_text_lookup(character_bank.get("characters", []))
-
         by_shot: dict[int, list[dict[str, Any]]] = {}
         for shot in aligned_storyboard.get("storyboard", []):
             shot_id = int(shot.get("shot_id", 0))
             bindings: list[dict[str, Any]] = []
             for idx, mapping in enumerate(shot.get("character_mappings", []), start=1):
                 ref_id = str(mapping.get("ref_id", "")).strip()
-                raw_state = mapping.get("state_id")
-                state_id = str(raw_state).strip() if raw_state is not None else ""
-                if not state_id and ref_id:
-                    state_id = state_lookup.get((ref_id, shot_id), "")
                 bindings.append(
                     {
                         "reference_index": idx,
                         "ref_id": ref_id,
-                        "state_id": state_id or None,
-                        "state_text": state_text_lookup.get((ref_id, state_id), "") if state_id else "",
                     }
                 )
             by_shot[shot_id] = bindings
         return by_shot
-
-    def _build_state_text_lookup(self, characters: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-        lookup: dict[tuple[str, str], str] = {}
-        for character in characters:
-            ref_id = str(character.get("ref_id", "")).strip()
-            if not ref_id:
-                continue
-            states = character.get("states")
-            if not isinstance(states, list):
-                continue
-            for state in states:
-                state_id = str((state or {}).get("state_id", "")).strip()
-                if not state_id:
-                    continue
-                state_text = str((state or {}).get("description", "")).strip()
-                lookup[(ref_id, state_id)] = state_text
-        return lookup
 
     def _attach_reference_bindings_to_storyboard(
         self,
@@ -1065,14 +1363,10 @@ class Stage1Pipeline:
             if reference_index <= 0:
                 continue
             ref_id = str(item.get("ref_id", "")).strip()
-            state_raw = item.get("state_id")
-            state_id = str(state_raw).strip() if state_raw is not None else ""
             normalized.append(
                 {
                     "reference_index": reference_index,
                     "ref_id": ref_id,
-                    "state_id": state_id or None,
-                    "state_text": str(item.get("state_text", "")).strip(),
                 }
             )
         return normalized
@@ -1085,23 +1379,36 @@ class Stage1Pipeline:
                 return False
             if str(exp.get("ref_id", "")) != str(act.get("ref_id", "")):
                 return False
-            if (exp.get("state_id") or None) != (act.get("state_id") or None):
-                return False
         return True
 
-    def _inject_state_text_into_image_prompt(self, image_prompt: str, bindings: list[dict[str, Any]]) -> str:
-        text = image_prompt
-        for binding in bindings:
-            state_text = str(binding.get("state_text", "")).strip()
-            if not state_text:
-                continue
-            index = int(binding.get("reference_index", 0))
-            if index <= 0:
-                continue
-            pattern = rf"参考图{index}(?!（)"
-            repl = f"参考图{index}（{state_text}状态）"
-            text = re.sub(pattern, repl, text)
-        return text
+    def _resolve_stage5_dump_path(self, task_id: str, raw_path: str) -> Path:
+        resolved_raw = raw_path.strip().replace("{task_id}", task_id)
+        path = Path(resolved_raw).expanduser()
+        if (path.exists() and path.is_dir()) or resolved_raw.endswith(("/", "\\")):
+            return path / f"stage05_context_{task_id}.json"
+        return path
+
+    def _dump_stage5_context(
+        self,
+        task_id: str,
+        raw_path: str,
+        debug_context: dict[str, Any],
+        final_table: dict[str, Any],
+    ) -> None:
+        dump_path = self._resolve_stage5_dump_path(task_id, raw_path)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "task_id": task_id,
+            "architect_prompt": str(debug_context.get("architect_prompt", "")),
+            "stage5_protocol_prompt": str(debug_context.get("stage5_protocol_prompt", "")),
+            "character_bank": debug_context.get("character_bank", {}),
+            "aligned_storyboard": debug_context.get("aligned_storyboard", {}),
+            "provider_request": debug_context.get("provider_request", {}),
+            "provider_raw_output": debug_context.get("provider_raw_output", {}),
+            "provider_table_output": debug_context.get("provider_table_output", {}),
+            "final_output": final_table,
+        }
+        dump_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _persist_index_and_result(
         self,

@@ -49,7 +49,7 @@ SCENE_DESCRIBE_PROMPT = """# Role
 # Constraint Rules
 1. **语言限制**：除 temp_id 外，所有字段严禁出现英文，必须使用简体中文。
 2. **性别必填**：subjects.appearance 必须以“男性”或“女性”开头，无法判断则使用“人物”。
-3. **体型必填**：必须从 [偏胖、匀称、纤细、健壮肌肉] 中选择其一或组合，严禁遗漏。
+3. **体型必填**：必须从 [偏胖、纤细、健壮肌肉] 中选择其一或组合，严禁遗漏。
 4. **动态追踪**：若同一角色在不同 scene_id 中出现，必须保持 temp_id 一致；若其体型发生变化，必须在 appearance 中体现。
 5. **空值处理**：若画面无人，subjects 必须设为空数组 []。
 6. **视觉深度**：描述应具备可拍摄性，避免抽象情感词，多使用具象视觉描述。"""
@@ -100,6 +100,7 @@ class VLMProvider(ABC):
         architect_prompt: str,
         model: str,
         retry_max: int,
+        debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -174,23 +175,47 @@ class GeminiVLMProvider(VLMProvider):
         architect_prompt: str,
         model: str,
         retry_max: int,
+        debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        prompt = (
+        stage5_protocol_prompt = (
             "请严格按照系统规范输出最终 JSON。结构："
-            "{project_id, prompts:[{shot_id,reference_bindings:[{reference_index,ref_id,state_id,state_text}],image_prompt,video_prompt}]}。"
+            "{project_id, prompts:[{shot_id,reference_bindings:[{reference_index,ref_id}],image_prompt,video_prompt}]}。"
             "不要输出 markdown，不要解释。"
             "所有自然语言内容必须使用简体中文，"
             "image_prompt 与 video_prompt 必须全中文（字段名保持英文）。"
             "输入 storyboard 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
-            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}（{state_text}状态）”，不得只写“参考图1/2”。"
+            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}”，不得省略参考图编号。"
+            "输入还包含 reference_catalog（ref_id到参考图路径映射）。"
+            "你必须以 storyboard 中的 character_mappings（appearance/action_in_shot/expression_range）"
+            "与 environment_context/camera_instruction 为唯一事实来源来写提示词，禁止杜撰新增外貌、服装、配饰。"
+            "每个参考图编号必须严格对应 storyboard.reference_bindings[].reference_index。"
+            "你必须读取 reference_catalog 中全部 Ref_n 的身份定义与参考图，不得只关注单个 Ref。"
+            "reference_catalog 仅用于编号与ref映射，不要在提示词中输出文件路径。"
         )
+        reference_parts = self._build_reference_image_parts(aligned_storyboard)
         parts = [
-            {"text": architect_prompt},
-            {"text": prompt},
-            {"text": json.dumps(character_bank, ensure_ascii=False)},
+            {"text": stage5_protocol_prompt},
             {"text": json.dumps(aligned_storyboard, ensure_ascii=False)},
+            *reference_parts,
         ]
-        payload = self._generate_json(parts=parts, model=model, retry_max=retry_max)
+        if isinstance(debug_context, dict):
+            debug_context["architect_prompt"] = architect_prompt
+            debug_context["stage5_protocol_prompt"] = stage5_protocol_prompt
+            debug_context["character_bank"] = json.loads(json.dumps(character_bank, ensure_ascii=False))
+            debug_context["aligned_storyboard"] = json.loads(json.dumps(aligned_storyboard, ensure_ascii=False))
+            debug_context["provider_request"] = {
+                "provider": "gemini",
+                "model": model,
+                "retry_max": retry_max,
+                "body": {
+                    "contents": [{"role": "user", "parts": parts}],
+                    "systemInstruction": {"parts": [{"text": architect_prompt}]},
+                    "generationConfig": {"responseMimeType": "application/json"},
+                },
+            }
+        payload = self._generate_json(parts=parts, model=model, retry_max=retry_max, system_instruction=architect_prompt)
+        if isinstance(debug_context, dict):
+            debug_context["provider_raw_output"] = json.loads(json.dumps(payload, ensure_ascii=False))
 
         if isinstance(payload, dict) and isinstance(payload.get("prompts"), list):
             prompts = []
@@ -210,11 +235,50 @@ class GeminiVLMProvider(VLMProvider):
 
         raise Stage1Error("vlm_invalid_output", "Gemini 返回的最终提示词表格式无效", 502)
 
-    def _generate_json(self, parts: list[dict[str, Any]], model: str, retry_max: int) -> Any:
+    def _build_reference_image_parts(self, aligned_storyboard: dict[str, Any]) -> list[dict[str, Any]]:
+        reference_catalog = aligned_storyboard.get("reference_catalog")
+        if not isinstance(reference_catalog, list):
+            return []
+
+        parts: list[dict[str, Any]] = []
+        for idx, item in enumerate(reference_catalog, start=1):
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("ref_id", "")).strip()
+            if not ref_id:
+                continue
+            parts.append({"text": f"参考图{idx} 对应 {ref_id}。"})
+
+            ref_image_path = str(item.get("ref_image_path", "")).strip()
+            if ref_image_path:
+                try:
+                    path = Path(ref_image_path).expanduser()
+                    if path.exists() and path.is_file():
+                        parts.append({"inline_data": self._to_inline_data(path)})
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+
+            ref_image_url = str(item.get("ref_image_url", "")).strip()
+            if ref_image_url:
+                parts.append({"text": f"{ref_id} 参考图URL: {ref_image_url}"})
+        return parts
+
+    def _generate_json(
+        self,
+        parts: list[dict[str, Any]],
+        model: str,
+        retry_max: int,
+        system_instruction: str = "",
+    ) -> Any:
         body = {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json"},
         }
+        if system_instruction.strip():
+            body["systemInstruction"] = {
+                "parts": [{"text": system_instruction}],
+            }
 
         last_error: Exception | None = None
         for _ in range(retry_max + 1):
@@ -469,28 +533,58 @@ class QwenVLMProvider(VLMProvider):
         architect_prompt: str,
         model: str,
         retry_max: int,
+        debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        stage5_protocol_prompt = (
+            "请严格按系统规范输出 JSON："
+            "{\"project_id\":\"string\",\"prompts\":[{\"shot_id\":number,\"reference_bindings\":[{\"reference_index\":number,\"ref_id\":\"string\"}],\"image_prompt\":\"string\",\"video_prompt\":\"string\"}]}"
+            "。所有自然语言必须使用简体中文，不要输出 markdown，不要解释。"
+            "输入 storyboard 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
+            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}”，不得省略参考图编号。"
+            "输入还包含 reference_catalog（ref_id到参考图路径映射）。"
+            "你必须以 storyboard 中的 character_mappings（appearance/action_in_shot/expression_range）"
+            "与 environment_context/camera_instruction 为唯一事实来源来写提示词，禁止杜撰新增外貌、服装、配饰。"
+            "每个参考图编号必须严格对应 storyboard.reference_bindings[].reference_index。"
+            "你必须读取 reference_catalog 中全部 Ref_n 的身份定义与参考图，不得只关注单个 Ref。"
+            "reference_catalog 仅用于编号与ref映射，不要在提示词中输出文件路径。"
+        )
+        reference_contents = self._build_reference_image_contents(aligned_storyboard)
         messages = [
+            {
+                "role": "system",
+                "content": architect_prompt,
+            },
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": architect_prompt},
                     {
                         "type": "text",
-                        "text": (
-                            "请严格按系统规范输出 JSON："
-                            "{\"project_id\":\"string\",\"prompts\":[{\"shot_id\":number,\"reference_bindings\":[{\"reference_index\":number,\"ref_id\":\"string\",\"state_id\":\"string|null\",\"state_text\":\"string\"}],\"image_prompt\":\"string\",\"video_prompt\":\"string\"}]}"
-                            "。所有自然语言必须使用简体中文，不要输出 markdown，不要解释。"
-                            "输入 storyboard 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
-                            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}（{state_text}状态）”，不得只写“参考图1/2”。"
-                        ),
+                        "text": stage5_protocol_prompt,
                     },
-                    {"type": "text", "text": json.dumps(character_bank, ensure_ascii=False)},
                     {"type": "text", "text": json.dumps(aligned_storyboard, ensure_ascii=False)},
+                    *reference_contents,
                 ],
             }
         ]
+        if isinstance(debug_context, dict):
+            debug_context["architect_prompt"] = architect_prompt
+            debug_context["stage5_protocol_prompt"] = stage5_protocol_prompt
+            debug_context["character_bank"] = json.loads(json.dumps(character_bank, ensure_ascii=False))
+            debug_context["aligned_storyboard"] = json.loads(json.dumps(aligned_storyboard, ensure_ascii=False))
+            debug_context["provider_request"] = {
+                "provider": "qwen",
+                "model": model,
+                "retry_max": retry_max,
+                "body": {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "response_format": {"type": "json_object"},
+                },
+            }
         payload = self._chat_completion_json(messages=messages, model=model, retry_max=retry_max)
+        if isinstance(debug_context, dict):
+            debug_context["provider_raw_output"] = json.loads(json.dumps(payload, ensure_ascii=False))
         if isinstance(payload, dict) and isinstance(payload.get("prompts"), list):
             prompts = []
             for item in payload["prompts"]:
@@ -507,6 +601,36 @@ class QwenVLMProvider(VLMProvider):
                 "prompts": prompts,
             }
         raise Stage1Error("vlm_invalid_output", "Qwen 返回的最终提示词表格式无效", 502)
+
+    def _build_reference_image_contents(self, aligned_storyboard: dict[str, Any]) -> list[dict[str, Any]]:
+        reference_catalog = aligned_storyboard.get("reference_catalog")
+        if not isinstance(reference_catalog, list):
+            return []
+
+        content: list[dict[str, Any]] = []
+        for idx, item in enumerate(reference_catalog, start=1):
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("ref_id", "")).strip()
+            if not ref_id:
+                continue
+            content.append({"type": "text", "text": f"参考图{idx} 对应 {ref_id}。"})
+
+            ref_image_url = str(item.get("ref_image_url", "")).strip()
+            if ref_image_url:
+                content.append({"type": "image_url", "image_url": {"url": ref_image_url}})
+                continue
+
+            ref_image_path = str(item.get("ref_image_path", "")).strip()
+            if not ref_image_path:
+                continue
+            try:
+                path = Path(ref_image_path).expanduser()
+                if path.exists() and path.is_file():
+                    content.append({"type": "image_url", "image_url": {"url": self._to_data_uri(path)}})
+            except Exception:  # noqa: BLE001
+                continue
+        return content
 
     def ensure_ready(self) -> None:
         if not self.api_key:

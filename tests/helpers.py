@@ -109,7 +109,22 @@ class FakeVLMProvider(VLMProvider):
             reviewed.append(record)
         return reviewed
 
-    def generate_production_table(self, character_bank, aligned_storyboard, architect_prompt: str, model: str, retry_max: int):  # noqa: ARG002
+    def generate_production_table(
+        self,
+        character_bank,
+        aligned_storyboard,
+        architect_prompt: str,
+        model: str,
+        retry_max: int,
+        debug_context=None,
+    ):  # noqa: ARG002
+        if isinstance(debug_context, dict):
+            debug_context["architect_prompt"] = architect_prompt
+            debug_context["stage5_protocol_prompt"] = "fake_stage5_protocol"
+            debug_context["character_bank"] = character_bank
+            debug_context["aligned_storyboard"] = aligned_storyboard
+            debug_context["provider_request"] = {"provider": "fake", "model": model}
+            debug_context["provider_raw_output"] = {"ok": True}
         prompts = []
         for shot in aligned_storyboard.get("storyboard", []):
             sid = int(shot["shot_id"])
