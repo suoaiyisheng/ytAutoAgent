@@ -34,6 +34,12 @@ def _build_state_scene_lookup(characters: list[dict[str, Any]]) -> dict[tuple[st
         ref_id = str(character.get("ref_id", "")).strip()
         if not ref_id:
             continue
+        base_state_id = str(character.get("base_state_id", "")).strip()
+        base_state = character.get("base_state") or {}
+        for presence in base_state.get("evidence_scene_presence", []) or []:
+            scene_id = _scene_id_from_presence_item(presence)
+            if scene_id is not None and base_state_id:
+                lookup[(ref_id, scene_id)] = base_state_id
         states = character.get("states")
         if not isinstance(states, list):
             continue
@@ -59,6 +65,10 @@ def _build_state_text_lookup(characters: list[dict[str, Any]]) -> dict[tuple[str
         ref_id = str(character.get("ref_id", "")).strip()
         if not ref_id:
             continue
+        base_state = character.get("base_state") or {}
+        base_state_id = str(base_state.get("state_id", "")).strip()
+        if base_state_id:
+            lookup[(ref_id, base_state_id)] = str(base_state.get("state_description", "")).strip()
         states = character.get("states")
         if not isinstance(states, list):
             continue
@@ -66,42 +76,27 @@ def _build_state_text_lookup(characters: list[dict[str, Any]]) -> dict[tuple[str
             state_id = str((state or {}).get("state_id", "")).strip()
             if not state_id:
                 continue
-            state_text = str((state or {}).get("description", "")).strip()
+            state_text = str((state or {}).get("state_description", "")).strip()
             lookup[(ref_id, state_id)] = state_text
     return lookup
 
 
 def _build_reference_bindings_by_shot(
-    storyboard: list[dict[str, Any]],
+    scenes: list[dict[str, Any]],
     characters: list[dict[str, Any]],
 ) -> dict[int, list[dict[str, Any]]]:
     state_lookup = _build_state_scene_lookup(characters)
     state_text_lookup = _build_state_text_lookup(characters)
-    single_state_lookup: dict[str, str] = {}
-    for character in characters:
-        ref_id = str(character.get("ref_id", "")).strip()
-        if not ref_id:
-            continue
-        states = character.get("states")
-        if not isinstance(states, list):
-            continue
-        ids = [str((s or {}).get("state_id", "")).strip() for s in states]
-        ids = [x for x in ids if x]
-        if len(ids) == 1:
-            single_state_lookup[ref_id] = ids[0]
-
     by_shot: dict[int, list[dict[str, Any]]] = {}
-    for shot in storyboard:
-        shot_id = int(shot.get("shot_id", 0))
+    for scene in scenes:
+        shot_id = int(scene.get("scene_id", 0))
         bindings: list[dict[str, Any]] = []
-        for idx, mapping in enumerate(shot.get("character_mappings", []), start=1):
-            ref_id = str(mapping.get("ref_id", "")).strip()
-            raw_state = mapping.get("state_id")
-            state_id = str(raw_state).strip() if raw_state is not None else ""
-            if not state_id and ref_id:
-                state_id = state_lookup.get((ref_id, shot_id), "")
-            if not state_id and ref_id in single_state_lookup:
-                state_id = single_state_lookup[ref_id]
+        ref_ids: list[str] = []
+        for ref_id in re.findall(r"Ref_\d+", str(scene.get("desc", ""))):
+            if ref_id not in ref_ids:
+                ref_ids.append(ref_id)
+        for idx, ref_id in enumerate(ref_ids, start=1):
+            state_id = state_lookup.get((ref_id, shot_id), "")
             bindings.append(
                 {
                     "reference_index": idx,
@@ -144,18 +139,20 @@ def _scene_assets(physical_manifest: dict[str, Any]) -> dict[int, dict[str, str]
 
 def _select_unique_ref_image_paths(
     characters: list[dict[str, Any]],
-    storyboard: list[dict[str, Any]],
+    scenes: list[dict[str, Any]],
     scene_assets: dict[int, dict[str, str]],
 ) -> dict[str, str]:
     shot_presence: dict[str, list[int]] = defaultdict(list)
     solo_presence: dict[str, list[int]] = defaultdict(list)
-    for shot in storyboard:
+    for scene in scenes:
         try:
-            shot_id = int(shot.get("shot_id", 0))
+            shot_id = int(scene.get("scene_id", 0))
         except (TypeError, ValueError):
             continue
-        mappings = shot.get("character_mappings", [])
-        ref_ids = [str(m.get("ref_id", "")).strip() for m in mappings if str(m.get("ref_id", "")).strip()]
+        ref_ids: list[str] = []
+        for ref_id in re.findall(r"Ref_\d+", str(scene.get("desc", ""))):
+            if ref_id not in ref_ids:
+                ref_ids.append(ref_id)
         for ref_id in ref_ids:
             shot_presence[ref_id].append(shot_id)
         if len(ref_ids) == 1:
@@ -219,31 +216,35 @@ def _select_unique_ref_image_paths(
 def repair_job(job_dir: Path, write_generation_inputs: bool = True) -> dict[str, Any]:
     physical_manifest_path = job_dir / "01_physical_manifest.json"
     character_bank_path = job_dir / "03_character_bank.json"
-    aligned_storyboard_path = job_dir / "04_aligned_storyboard.json"
+    normalized_scene_descriptions_path = job_dir / "04_normalized_scene_descriptions.json"
     final_table_path = job_dir / "05_final_production_table.json"
     generation_inputs_path = job_dir / "06_generation_inputs.json"
 
-    if not all(path.exists() for path in [physical_manifest_path, character_bank_path, aligned_storyboard_path, final_table_path]):
-        missing = [str(p) for p in [physical_manifest_path, character_bank_path, aligned_storyboard_path, final_table_path] if not p.exists()]
+    if not all(path.exists() for path in [physical_manifest_path, character_bank_path, normalized_scene_descriptions_path, final_table_path]):
+        missing = [
+            str(p)
+            for p in [physical_manifest_path, character_bank_path, normalized_scene_descriptions_path, final_table_path]
+            if not p.exists()
+        ]
         raise FileNotFoundError(f"缺少必要文件: {missing}")
 
     physical_manifest = _load_json(physical_manifest_path)
     character_bank = _load_json(character_bank_path)
-    aligned_storyboard = _load_json(aligned_storyboard_path)
+    normalized_scene_descriptions = _load_json(normalized_scene_descriptions_path)
     final_table = _load_json(final_table_path)
 
     project_id = str(final_table.get("project_id") or character_bank.get("project_id") or job_dir.name)
     characters = character_bank.get("characters", [])
-    storyboard = aligned_storyboard.get("storyboard", [])
+    scenes = normalized_scene_descriptions.get("scenes", [])
     scene_assets = _scene_assets(physical_manifest)
 
-    resolved_ref_paths = _select_unique_ref_image_paths(characters=characters, storyboard=storyboard, scene_assets=scene_assets)
+    resolved_ref_paths = _select_unique_ref_image_paths(characters=characters, scenes=scenes, scene_assets=scene_assets)
     for character in characters:
         ref_id = str(character.get("ref_id", "")).strip()
         if ref_id in resolved_ref_paths:
             character["ref_image_path"] = resolved_ref_paths[ref_id]
 
-    expected_bindings = _build_reference_bindings_by_shot(storyboard=storyboard, characters=characters)
+    expected_bindings = _build_reference_bindings_by_shot(scenes=scenes, characters=characters)
     prompts_by_shot: dict[int, dict[str, Any]] = {}
     for item in final_table.get("prompts", []):
         try:
@@ -253,8 +254,8 @@ def repair_job(job_dir: Path, write_generation_inputs: bool = True) -> dict[str,
         prompts_by_shot[shot_id] = item
 
     repaired_prompts: list[dict[str, Any]] = []
-    for shot in storyboard:
-        shot_id = int(shot.get("shot_id", 0))
+    for scene in scenes:
+        shot_id = int(scene.get("scene_id", 0))
         old_item = prompts_by_shot.get(shot_id, {})
         bindings = expected_bindings.get(shot_id, [])
         image_prompt = _inject_state_text(str(old_item.get("image_prompt", "")).strip(), bindings)
@@ -270,12 +271,12 @@ def repair_job(job_dir: Path, write_generation_inputs: bool = True) -> dict[str,
     final_table["project_id"] = project_id
     final_table["prompts"] = repaired_prompts
     character_bank["project_id"] = project_id
-    aligned_storyboard["project_id"] = project_id
+    normalized_scene_descriptions["project_id"] = project_id
     character_bank["characters"] = characters
 
     _write_json(final_table_path, final_table)
     _write_json(character_bank_path, character_bank)
-    _write_json(aligned_storyboard_path, aligned_storyboard)
+    _write_json(normalized_scene_descriptions_path, normalized_scene_descriptions)
 
     generation_inputs: dict[str, Any] = {}
     if write_generation_inputs:

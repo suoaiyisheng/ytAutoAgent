@@ -13,7 +13,7 @@ class TaskStore:
         "physical_manifest": "01_physical_manifest.json",
         "raw_scene_descriptions": "02_raw_scene_descriptions.json",
         "character_bank": "03_character_bank.json",
-        "aligned_storyboard": "04_aligned_storyboard.json",
+        "normalized_scene_descriptions": "04_normalized_scene_descriptions.json",
         "final_production_table": "05_final_production_table.json",
     }
 

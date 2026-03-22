@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from app.errors import Stage1Error
 from app.models import TaskRecord
 from app.services.media_probe import VideoMetadata
@@ -51,12 +53,12 @@ class FakeMediaProbe:
         return VideoMetadata(fps=30.0, resolution="1920x1080")
 
 
-def _build_unit_pipeline(tmp_path: Path) -> Stage1Pipeline:
+def _build_unit_pipeline(tmp_path: Path, vlm_provider: VLMProvider | None = None, embedding_provider: EmbeddingProvider | None = None) -> Stage1Pipeline:
     return Stage1Pipeline(
         store=TaskStore(tmp_path / "jobs"),
         timeout_sec=120,
-        vlm_provider=FakeVLMProvider(),
-        embedding_provider=FakeEmbeddingProvider(),
+        vlm_provider=vlm_provider or FakeVLMProvider(),
+        embedding_provider=embedding_provider or FakeEmbeddingProvider(),
     )
 
 
@@ -72,7 +74,137 @@ def _wait_until_done(client, task_id: str, timeout: float = 4.0) -> dict:
     raise AssertionError(f"任务未结束，最后状态: {last}")
 
 
-def test_full_pipeline_contracts_and_alignment(tmp_path):
+class WeightLossVLMProvider(VLMProvider):
+    def describe_scenes(self, scene_inputs, model: str, retry_max: int):  # noqa: ARG002
+        return [
+            {
+                "scene_id": 1,
+                "subjects": [
+                    {
+                        "subject_id": "subject_1",
+                        "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖",
+                    }
+                ],
+                "desc": "subject_1 在卧室穿衣镜前正在看着镜子哭泣。",
+            },
+            {
+                "scene_id": 2,
+                "subjects": [
+                    {
+                        "subject_id": "subject_1",
+                        "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖",
+                    }
+                ],
+                "desc": "subject_1 在客厅瑜伽垫上正在运动。",
+            },
+            {
+                "scene_id": 3,
+                "subjects": [
+                    {
+                        "subject_id": "subject_1",
+                        "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型清瘦",
+                    }
+                ],
+                "desc": "subject_1 在卧室穿衣镜前正在看向镜中的自己微笑。",
+            },
+        ]
+
+    def review_character_candidates(self, candidates, model: str, retry_max: int):  # noqa: ARG002
+        return candidates
+
+    def generate_production_table(
+        self,
+        character_bank,
+        stage5_input,
+        architect_prompt: str,
+        model: str,
+        retry_max: int,
+        debug_context=None,
+    ):  # noqa: ARG002
+        if isinstance(debug_context, dict):
+            debug_context["architect_prompt"] = architect_prompt
+            debug_context["stage5_protocol_prompt"] = "weight_loss_protocol"
+            debug_context["character_bank"] = character_bank
+            debug_context["stage5_input"] = stage5_input
+            debug_context["provider_request"] = {"provider": "weight_loss", "model": model}
+            debug_context["provider_raw_output"] = {"ok": True}
+        return {
+            "project_id": stage5_input.get("project_id", ""),
+            "prompts": [
+                {
+                    "shot_id": int(shot["shot_id"]),
+                    "reference_bindings": [{"reference_index": 99, "ref_id": "Ref_X"}],
+                    "image_prompt": f"镜头{shot['shot_id']}，参考图1。",
+                    "video_prompt": "固定镜头。",
+                }
+                for shot in stage5_input.get("shots", [])
+            ],
+        }
+
+
+class WeightLossEmbeddingProvider(EmbeddingProvider):
+    def embed_texts(self, texts, model: str, retry_max: int):  # noqa: ARG002
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+
+class SplitRefVLMProvider(VLMProvider):
+    def describe_scenes(self, scene_inputs, model: str, retry_max: int):  # noqa: ARG002
+        return [
+            {
+                "scene_id": 1,
+                "subjects": [{"subject_id": "subject_1", "appearance": "女性，紫色长辫子，黄色短袖，体型偏胖"}],
+                "desc": "subject_1 在室内正在站立。",
+            },
+            {
+                "scene_id": 2,
+                "subjects": [{"subject_id": "subject_1", "appearance": "女性，紫色长辫子，黄色短袖，体型偏胖"}],
+                "desc": "subject_1 在室内正在行走。",
+            },
+            {
+                "scene_id": 3,
+                "subjects": [{"subject_id": "subject_1", "appearance": "男性，金色短发，白色实验服，佩戴眼镜，体型匀称"}],
+                "desc": "subject_1 在实验室正在讲解。",
+            },
+        ]
+
+    def review_character_candidates(self, candidates, model: str, retry_max: int):  # noqa: ARG002
+        return candidates
+
+    def generate_production_table(
+        self,
+        character_bank,
+        stage5_input,
+        architect_prompt: str,
+        model: str,
+        retry_max: int,
+        debug_context=None,
+    ):  # noqa: ARG002
+        return {
+            "project_id": stage5_input.get("project_id", ""),
+            "prompts": [
+                {
+                    "shot_id": int(shot["shot_id"]),
+                    "reference_bindings": shot.get("reference_bindings", []),
+                    "image_prompt": "参考图1。",
+                    "video_prompt": "固定镜头。",
+                }
+                for shot in stage5_input.get("shots", [])
+            ],
+        }
+
+
+class SplitRefEmbeddingProvider(EmbeddingProvider):
+    def embed_texts(self, texts, model: str, retry_max: int):  # noqa: ARG002
+        vectors = []
+        for text in texts:
+            if "实验服" in str(text) or "眼镜" in str(text):
+                vectors.append([0.0, 1.0, 0.0])
+            else:
+                vectors.append([1.0, 0.0, 0.0])
+        return vectors
+
+
+def test_full_pipeline_few_shot_weight_loss_contracts(tmp_path):
     source = tmp_path / "input.mp4"
     source.write_bytes(b"fake-video")
 
@@ -80,8 +212,8 @@ def test_full_pipeline_contracts_and_alignment(tmp_path):
     pipeline = Stage1Pipeline(
         store=store,
         timeout_sec=120,
-        vlm_provider=FakeVLMProvider(),
-        embedding_provider=FakeEmbeddingProvider(),
+        vlm_provider=WeightLossVLMProvider(),
+        embedding_provider=WeightLossEmbeddingProvider(),
         downloader=LocalFileDownloader(source),
         scene_detector=FixedSceneDetector(),
         frame_extractor=TouchFrameExtractor(),
@@ -89,7 +221,7 @@ def test_full_pipeline_contracts_and_alignment(tmp_path):
     )
 
     task = TaskRecord.new(
-        task_id="task_local",
+        task_id="task_weight_loss",
         params={
             "source_url": "https://example.com/test",
             "local_video_path": None,
@@ -102,7 +234,7 @@ def test_full_pipeline_contracts_and_alignment(tmp_path):
             "batch_size": 2,
             "retry_max": 0,
         },
-        working_dir=str(store.task_dir("task_local")),
+        working_dir=str(store.task_dir("task_weight_loss")),
     )
 
     result = pipeline.run(task, lambda *_: None)
@@ -110,37 +242,101 @@ def test_full_pipeline_contracts_and_alignment(tmp_path):
     assert result["stats"]["character_count"] == 1
     assert result["stats"]["prompt_count"] == 3
 
-    for contract_path in result["contracts"].values():
-        assert Path(contract_path).exists()
+    raw_scene = json.loads(Path(result["contracts"]["raw_scene_descriptions"]).read_text(encoding="utf-8"))
+    assert set(raw_scene["scenes"][0].keys()) == {"scene_id", "subjects", "desc"}
+    assert raw_scene["scenes"][0]["subjects"][0]["subject_id"] == "subject_1"
+    assert "Ref_" not in raw_scene["scenes"][0]["desc"]
 
     character_bank = json.loads(Path(result["contracts"]["character_bank"]).read_text(encoding="utf-8"))
-    for character in character_bank["characters"]:
-        assert {"ref_id", "ref_image_path", "scene_presence", "name", "master_description", "key_features"}.issubset(
-            set(character.keys())
-        )
-        assert isinstance(character["key_features"], list)
-        for presence in character["scene_presence"]:
-            assert isinstance(presence, list)
-            assert len(presence) == 2
-            assert isinstance(presence[0], int)
-            assert isinstance(presence[1], str)
+    character = character_bank["characters"][0]
+    assert set(character.keys()) == {"ref_id", "canonical_description", "ref_image_path", "scene_presence"}
+    assert character["ref_id"] == "Ref_1"
+    assert character["scene_presence"] == [[1, "subject_1"], [2, "subject_1"], [3, "subject_1"]]
+    assert "体型偏胖" in character["canonical_description"]
+    assert "体型清瘦" in character["canonical_description"]
+    assert "subject_mappings" not in character_bank
 
-    aligned = json.loads(Path(result["contracts"]["aligned_storyboard"]).read_text(encoding="utf-8"))
-    assert aligned["scenes"][0]["visual_analysis"]["subjects"][0]["id"] == "Ref_1"
-    assert aligned["scenes"][1]["visual_analysis"]["subjects"][0]["id"] == "Ref_1"
-    for scene in aligned["scenes"]:
-        for subject in scene["visual_analysis"]["subjects"]:
-            assert set(subject.keys()) == {"id", "appearance", "action", "expression"}
-            assert "temp_id" not in subject
+    normalized = json.loads(Path(result["contracts"]["normalized_scene_descriptions"]).read_text(encoding="utf-8"))
+    assert set(normalized.keys()) == {"project_id", "scenes"}
+    assert normalized["scenes"][0]["desc"] == "（女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖）的Ref_1 在卧室穿衣镜前正在看着镜子哭泣。"
+    assert normalized["scenes"][1]["desc"] == "（女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖）的Ref_1 在客厅瑜伽垫上正在运动。"
+    assert normalized["scenes"][2]["desc"] == "（女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型清瘦）的Ref_1 在卧室穿衣镜前正在看向镜中的自己微笑。"
+    assert "客厅瑜伽垫上正在运动" in normalized["scenes"][1]["desc"]
 
     final_table = json.loads(Path(result["contracts"]["final_production_table"]).read_text(encoding="utf-8"))
-    first_bindings = final_table["prompts"][0]["reference_bindings"]
-    assert first_bindings[0]["reference_index"] == 1
-    assert first_bindings[0]["ref_id"] == "Ref_1"
-    assert set(first_bindings[0].keys()) == {"reference_index", "ref_id"}
+    assert final_table["prompts"][0]["reference_bindings"] == [{"reference_index": 1, "ref_id": "Ref_1"}]
 
 
-def test_stage5_dump_context_file_generated(tmp_path):
+def test_stage3_can_split_different_people_into_different_refs(tmp_path):
+    source = tmp_path / "input.mp4"
+    source.write_bytes(b"fake-video")
+
+    store = TaskStore(tmp_path / "jobs")
+    pipeline = Stage1Pipeline(
+        store=store,
+        timeout_sec=120,
+        vlm_provider=SplitRefVLMProvider(),
+        embedding_provider=SplitRefEmbeddingProvider(),
+        downloader=LocalFileDownloader(source),
+        scene_detector=FixedSceneDetector(),
+        frame_extractor=TouchFrameExtractor(),
+        media_probe=FakeMediaProbe(),
+    )
+
+    task = TaskRecord.new(
+        task_id="task_split_ref",
+        params={
+            "source_url": "https://example.com/test",
+            "local_video_path": None,
+            "threshold": 27.0,
+            "min_scene_len": 1.0,
+            "frame_quality": 2,
+            "download_format": "bestvideo+bestaudio/best",
+            "vlm_model": None,
+            "embed_model": None,
+            "batch_size": 2,
+            "retry_max": 0,
+        },
+        working_dir=str(store.task_dir("task_split_ref")),
+    )
+
+    result = pipeline.run(task, lambda *_: None)
+    character_bank = json.loads(Path(result["contracts"]["character_bank"]).read_text(encoding="utf-8"))
+    assert [item["ref_id"] for item in character_bank["characters"]] == ["Ref_1", "Ref_2"]
+    assert character_bank["characters"][0]["scene_presence"] == [[1, "subject_1"], [2, "subject_1"]]
+    assert character_bank["characters"][1]["scene_presence"] == [[3, "subject_1"]]
+
+
+def test_stage4_raises_when_subject_mapping_missing(tmp_path):
+    pipeline = _build_unit_pipeline(tmp_path)
+    raw_scene_descriptions = {
+        "project_id": "task_missing_mapping",
+        "scenes": [
+            {
+                "scene_id": 1,
+                "subjects": [{"subject_id": "subject_1", "appearance": "女性，长发，黄色短袖，体型偏胖"}],
+                "desc": "subject_1 在卧室正在哭泣。",
+            }
+        ],
+    }
+    character_bank = {
+        "project_id": "task_missing_mapping",
+        "characters": [],
+        "global_style": "真实摄影风格",
+    }
+
+    with pytest.raises(Stage1Error) as exc:
+        pipeline._run_stage4(  # noqa: SLF001
+            TaskRecord.new(task_id="task_missing_mapping", params={}, working_dir=str(tmp_path)),
+            raw_scene_descriptions,
+            character_bank,
+            lambda *_: None,
+            time.monotonic(),
+        )
+    assert exc.value.code == "subject_mapping_missing"
+
+
+def test_stage5_dump_context_contains_stage5_input(tmp_path):
     source = tmp_path / "input.mp4"
     source.write_bytes(b"fake-video")
     dump_dir = tmp_path / "dump_ctx"
@@ -150,8 +346,8 @@ def test_stage5_dump_context_file_generated(tmp_path):
     pipeline = Stage1Pipeline(
         store=store,
         timeout_sec=120,
-        vlm_provider=FakeVLMProvider(),
-        embedding_provider=FakeEmbeddingProvider(),
+        vlm_provider=WeightLossVLMProvider(),
+        embedding_provider=WeightLossEmbeddingProvider(),
         downloader=LocalFileDownloader(source),
         scene_detector=FixedSceneDetector(),
         frame_extractor=TouchFrameExtractor(),
@@ -162,13 +358,10 @@ def test_stage5_dump_context_file_generated(tmp_path):
         task_id="task_dump_ctx",
         params={
             "source_url": "https://example.com/test",
-            "local_video_path": None,
             "threshold": 27.0,
             "min_scene_len": 1.0,
             "frame_quality": 2,
             "download_format": "bestvideo+bestaudio/best",
-            "vlm_model": None,
-            "embed_model": None,
             "batch_size": 2,
             "retry_max": 0,
             "stage5_dump_path": str(dump_dir),
@@ -178,418 +371,11 @@ def test_stage5_dump_context_file_generated(tmp_path):
 
     pipeline.run(task, lambda *_: None)
     dump_path = dump_dir / "stage05_context_task_dump_ctx.json"
-    assert dump_path.exists()
     payload = json.loads(dump_path.read_text(encoding="utf-8"))
-    assert payload["task_id"] == "task_dump_ctx"
-    for key in [
-        "architect_prompt",
-        "stage5_protocol_prompt",
-        "character_bank",
-        "aligned_storyboard",
-        "provider_request",
-        "provider_raw_output",
-        "provider_table_output",
-        "final_output",
-    ]:
-        assert key in payload
-    assert payload["final_output"]["project_id"] == "task_dump_ctx"
-    assert isinstance(payload["final_output"].get("prompts"), list)
-
-
-class SplitTempIdVLMProvider(VLMProvider):
-    def describe_scenes(self, scene_inputs, model: str, retry_max: int):  # noqa: ARG002
-        out = []
-        for item in scene_inputs:
-            sid = int(item["scene_id"])
-            if sid == 1:
-                subjects = [
-                    {"temp_id": "P1", "appearance": "女性，偏胖，紫色长辫子", "action": "站立", "expression": "平静"},
-                    {"temp_id": "P2", "appearance": "男性，匀称，上身赤裸，下半身鱼尾", "action": "游动", "expression": "微笑"},
-                ]
-            elif sid == 2:
-                subjects = [
-                    {"temp_id": "P1", "appearance": "女性，偏胖，紫色长辫子", "action": "行走", "expression": "平静"},
-                ]
-            elif sid == 3:
-                subjects = [
-                    {"temp_id": "P1", "appearance": "女性，偏胖，紫色长辫子", "action": "说话", "expression": "严肃"},
-                    {
-                        "temp_id": "P2",
-                        "appearance": "男性，匀称，金色短发，戴黑框眼镜，身穿白色实验服",
-                        "action": "讲解",
-                        "expression": "认真",
-                    },
-                ]
-            else:
-                raise Stage1Error("scene_invalid", f"unexpected scene {sid}", 500)
-            out.append(
-                {
-                    "scene_id": sid,
-                    "visual_analysis": {
-                        "subjects": subjects,
-                        "environment": {"location": "室内", "lighting": "明亮", "atmosphere": "自然"},
-                        "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
-                    },
-                }
-            )
-        return out
-
-    def review_character_candidates(self, candidates, model: str, retry_max: int):  # noqa: ARG002
-        return candidates
-
-    def generate_production_table(
-        self,
-        character_bank,
-        aligned_storyboard,
-        architect_prompt: str,
-        model: str,
-        retry_max: int,
-        debug_context=None,
-    ):  # noqa: ARG002
-        if isinstance(debug_context, dict):
-            debug_context["architect_prompt"] = architect_prompt
-            debug_context["stage5_protocol_prompt"] = "split_test_protocol"
-            debug_context["character_bank"] = character_bank
-            debug_context["aligned_storyboard"] = aligned_storyboard
-            debug_context["provider_request"] = {"provider": "split_test", "model": model}
-            debug_context["provider_raw_output"] = {"ok": True}
-        prompts = []
-        for shot in aligned_storyboard.get("storyboard", []):
-            sid = int(shot["shot_id"])
-            prompts.append(
-                {
-                    "shot_id": sid,
-                    "reference_bindings": shot.get("reference_bindings", []),
-                    "image_prompt": f"{sid}，参考图1。",
-                    "video_prompt": "固定镜头。",
-                }
-            )
-        return {"project_id": aligned_storyboard.get("project_id", ""), "prompts": prompts}
-
-
-class SplitTempIdEmbeddingProvider(EmbeddingProvider):
-    def embed_texts(self, texts, model: str, retry_max: int):  # noqa: ARG002
-        vectors = []
-        for text in texts:
-            normalized = str(text)
-            if "紫色长辫子" in normalized:
-                vectors.append([1.0, 0.0, 0.0])
-            elif "鱼尾" in normalized:
-                vectors.append([0.0, 1.0, 0.0])
-            elif "白色实验服" in normalized or "黑框眼镜" in normalized:
-                vectors.append([0.0, 0.0, 1.0])
-            else:
-                vectors.append([0.2, 0.2, 0.2])
-        return vectors
-
-
-def test_stage3_can_split_same_temp_id_into_different_refs(tmp_path):
-    source = tmp_path / "input.mp4"
-    source.write_bytes(b"fake-video")
-
-    store = TaskStore(tmp_path / "jobs")
-    pipeline = Stage1Pipeline(
-        store=store,
-        timeout_sec=120,
-        vlm_provider=SplitTempIdVLMProvider(),
-        embedding_provider=SplitTempIdEmbeddingProvider(),
-        downloader=LocalFileDownloader(source),
-        scene_detector=FixedSceneDetector(),
-        frame_extractor=TouchFrameExtractor(),
-        media_probe=FakeMediaProbe(),
-    )
-
-    task = TaskRecord.new(
-        task_id="task_split_temp_id",
-        params={
-            "source_url": "https://example.com/test",
-            "local_video_path": None,
-            "threshold": 27.0,
-            "min_scene_len": 1.0,
-            "frame_quality": 2,
-            "download_format": "bestvideo+bestaudio/best",
-            "vlm_model": None,
-            "embed_model": None,
-            "batch_size": 2,
-            "retry_max": 0,
-        },
-        working_dir=str(store.task_dir("task_split_temp_id")),
-    )
-    result = pipeline.run(task, lambda *_: None)
-    aligned = json.loads(Path(result["contracts"]["aligned_storyboard"]).read_text(encoding="utf-8"))
-
-    scene1_subjects = aligned["scenes"][0]["visual_analysis"]["subjects"]
-    scene3_subjects = aligned["scenes"][2]["visual_analysis"]["subjects"]
-    p2_ref_scene1 = scene1_subjects[1]["id"]
-    p2_ref_scene3 = scene3_subjects[1]["id"]
-    assert p2_ref_scene1.startswith("Ref_")
-    assert p2_ref_scene3.startswith("Ref_")
-    assert p2_ref_scene1 != p2_ref_scene3
-
-
-def test_aligned_storyboard_can_fallback_map_with_description_and_scene_presence(tmp_path):
-    store = TaskStore(tmp_path / "jobs")
-    pipeline = Stage1Pipeline(
-        store=store,
-        timeout_sec=120,
-        vlm_provider=FakeVLMProvider(),
-        embedding_provider=FakeEmbeddingProvider(),
-    )
-
-    raw_scene_descriptions = {
-        "project_id": "task_fallback_mapping",
-        "scenes": [
-            {
-                "scene_id": 1,
-                "visual_analysis": {
-                    "subjects": [
-                        {
-                            "temp_id": "P1",
-                            "appearance": "女性，偏胖，紫色长辫子，身穿黄色短袖上衣",
-                            "action": "站立",
-                            "expression": "平静",
-                        }
-                    ],
-                    "environment": {"location": "室内", "lighting": "明亮", "atmosphere": "自然"},
-                    "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
-                },
-            },
-            {
-                "scene_id": 2,
-                "visual_analysis": {
-                    "subjects": [
-                        {
-                            "temp_id": "P1",
-                            "appearance": "女性，偏胖，紫色长辫子，身穿黄色短袖上衣",
-                            "action": "行走",
-                            "expression": "平静",
-                        }
-                    ],
-                    "environment": {"location": "室内", "lighting": "明亮", "atmosphere": "自然"},
-                    "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
-                },
-            },
-        ],
-    }
-    characters = [
-        {
-            "ref_id": "Ref_1",
-            "name": "角色A",
-            "master_description": "女性，偏胖，紫色长辫子，身穿黄色短袖上衣",
-            "key_features": ["gender:female", "hair:purple_braid", "top:yellow", "body:overweight"],
-            "ref_image_path": "",
-            "scene_presence": [[1, "P1"]],
-        },
-        {
-            "ref_id": "Ref_2",
-            "name": "角色B",
-            "master_description": "女性，偏胖，紫色长辫子，身穿黄色短袖上衣",
-            "key_features": ["gender:female", "hair:purple_braid", "top:yellow", "body:overweight"],
-            "ref_image_path": "",
-            "scene_presence": [[2, "P1"]],
-        },
-    ]
-
-    aligned = pipeline._build_aligned_storyboard(raw_scene_descriptions, mapping={}, characters=characters)
-    assert aligned["scenes"][0]["visual_analysis"]["subjects"][0]["id"] == "Ref_1"
-    assert aligned["scenes"][1]["visual_analysis"]["subjects"][0]["id"] == "Ref_2"
-
-
-def test_stage5_generation_input_uses_aligned_storyboard_subject_facts(tmp_path):
-    pipeline = _build_unit_pipeline(tmp_path)
-    aligned_storyboard = {
-        "project_id": "task_stage5_appearance_priority",
-        "scenes": [
-            {
-                "scene_id": 1,
-                "visual_analysis": {
-                    "subjects": [
-                        {
-                            "id": "Ref_1",
-                            "appearance": "男性，黑发，红色外套",
-                            "action": "奔跑",
-                            "expression": "紧张",
-                        }
-                    ],
-                    "environment": {"location": "街道", "lighting": "阴天", "atmosphere": "压抑"},
-                    "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
-                },
-            }
-        ],
-    }
-    character_bank = {
-        "project_id": "task_stage5_appearance_priority",
-        "characters": [
-            {
-                "ref_id": "Ref_1",
-                "ref_image_path": "/tmp/ref_1.jpg",
-                "master_description": "女性，紫色长辫子，黄色短袖",
-                "key_features": ["女性", "紫色长辫子", "黄色短袖"],
-                "states": [
-                    {
-                        "state_id": "state_scene_1",
-                        "description": "女性，金发，白色外套",
-                        "scene_presence": [1],
-                    }
-                ],
-            }
-        ],
-    }
-
-    stage4_base_storyboard = pipeline._project_aligned_storyboard_to_stage4_storyboard(aligned_storyboard)
-    expected_bindings = pipeline._build_reference_bindings_by_shot(stage4_base_storyboard)
-    stage4_storyboard = pipeline._attach_reference_bindings_to_storyboard(
-        aligned_storyboard=stage4_base_storyboard,
-        bindings_by_shot=expected_bindings,
-    )
-    stage5_input = pipeline._build_stage5_generation_input(
-        aligned_storyboard=aligned_storyboard,
-        stage4_storyboard=stage4_storyboard,
-        character_bank=character_bank,
-    )
-
-    shot = stage5_input["storyboard"][0]
-    mapping = shot["character_mappings"][0]
-    assert mapping["appearance"] == "男性，黑发，红色外套"
-    assert mapping["action_in_shot"] == "奔跑"
-    assert mapping["expression_range"] == ["紧张"]
-    assert shot["reference_bindings"] == [{"reference_index": 1, "ref_id": "Ref_1"}]
-    assert stage5_input["reference_catalog"][0]["ref_image_path"] == "/tmp/ref_1.jpg"
-
-
-def test_stage5_generation_input_can_use_storyboard_only_and_keep_binding_order(tmp_path):
-    pipeline = _build_unit_pipeline(tmp_path)
-    aligned_storyboard = {
-        "project_id": "task_stage5_storyboard_only",
-        "storyboard": [
-            {
-                "shot_id": 2,
-                "character_mappings": [
-                    {
-                        "ref_id": "Ref_1",
-                        "appearance": "04外观A",
-                        "action_in_shot": "动作B",
-                        "expression_range": ["表情B"],
-                    }
-                ],
-                "environment_context": "环境B",
-                "camera_instruction": "机位B",
-            },
-            {
-                "shot_id": 1,
-                "character_mappings": [
-                    {
-                        "ref_id": "Ref_2",
-                        "appearance": "04外观2",
-                        "action_in_shot": "动作2",
-                        "expression_range": ["表情2"],
-                    },
-                    {
-                        "ref_id": "Ref_1",
-                        "appearance": "04外观1",
-                        "action_in_shot": "动作1",
-                        "expression_range": ["表情1"],
-                    },
-                ],
-                "environment_context": "环境A",
-                "camera_instruction": "机位A",
-            },
-        ],
-    }
-    character_bank = {
-        "project_id": "task_stage5_storyboard_only",
-        "characters": [
-            {
-                "ref_id": "Ref_1",
-                "ref_image_path": "/tmp/ref_1.jpg",
-                "master_description": "03外观1",
-                "key_features": ["角色1"],
-            },
-            {
-                "ref_id": "Ref_2",
-                "ref_image_path": "/tmp/ref_2.jpg",
-                "master_description": "03外观2",
-                "key_features": ["角色2"],
-            },
-        ],
-    }
-
-    stage4_base_storyboard = pipeline._project_aligned_storyboard_to_stage4_storyboard(aligned_storyboard)
-    expected_bindings = pipeline._build_reference_bindings_by_shot(stage4_base_storyboard)
-    stage4_storyboard = pipeline._attach_reference_bindings_to_storyboard(
-        aligned_storyboard=stage4_base_storyboard,
-        bindings_by_shot=expected_bindings,
-    )
-    stage5_input = pipeline._build_stage5_generation_input(
-        aligned_storyboard=aligned_storyboard,
-        stage4_storyboard=stage4_storyboard,
-        character_bank=character_bank,
-    )
-
-    assert [int(x["shot_id"]) for x in stage5_input["storyboard"]] == [1, 2]
-    shot1 = stage5_input["storyboard"][0]
-    assert [int(x["reference_index"]) for x in shot1["reference_bindings"]] == [1, 2]
-    assert [str(x["ref_id"]) for x in shot1["character_mappings"]] == ["Ref_2", "Ref_1"]
-    assert shot1["character_mappings"][0]["appearance"] == "04外观2"
-    assert shot1["character_mappings"][1]["appearance"] == "04外观1"
-    assert shot1["character_mappings"][0]["action_in_shot"] == "动作2"
-    assert shot1["character_mappings"][1]["action_in_shot"] == "动作1"
-    assert shot1["character_mappings"][0]["expression_range"] == ["表情2"]
-    assert shot1["character_mappings"][1]["expression_range"] == ["表情1"]
-    assert shot1["environment_context"] == "环境A"
-    assert shot1["camera_instruction"] == "机位A"
-
-
-def test_stage5_generation_input_allows_duplicate_ref_image_paths(tmp_path):
-    pipeline = _build_unit_pipeline(tmp_path)
-    aligned_storyboard = {
-        "project_id": "task_stage5_duplicate_ref_path",
-        "storyboard": [
-            {
-                "shot_id": 1,
-                "character_mappings": [
-                    {"ref_id": "Ref_1", "action_in_shot": "动作1", "expression_range": ["表情1"]},
-                    {"ref_id": "Ref_2", "action_in_shot": "动作2", "expression_range": ["表情2"]},
-                ],
-                "environment_context": "环境",
-                "camera_instruction": "机位",
-            }
-        ],
-    }
-    character_bank = {
-        "project_id": "task_stage5_duplicate_ref_path",
-        "characters": [
-            {
-                "ref_id": "Ref_1",
-                "ref_image_path": "/tmp/shared_ref.jpg",
-                "master_description": "角色1外观",
-                "key_features": ["角色1"],
-            },
-            {
-                "ref_id": "Ref_2",
-                "ref_image_path": "/tmp/shared_ref.jpg",
-                "master_description": "角色2外观",
-                "key_features": ["角色2"],
-            },
-        ],
-    }
-
-    stage4_base_storyboard = pipeline._project_aligned_storyboard_to_stage4_storyboard(aligned_storyboard)
-    expected_bindings = pipeline._build_reference_bindings_by_shot(stage4_base_storyboard)
-    stage4_storyboard = pipeline._attach_reference_bindings_to_storyboard(
-        aligned_storyboard=stage4_base_storyboard,
-        bindings_by_shot=expected_bindings,
-    )
-    stage5_input = pipeline._build_stage5_generation_input(
-        aligned_storyboard=aligned_storyboard,
-        stage4_storyboard=stage4_storyboard,
-        character_bank=character_bank,
-    )
-
-    reference_catalog = stage5_input["reference_catalog"]
-    assert len(reference_catalog) == 2
-    assert reference_catalog[0]["ref_image_path"] == "/tmp/shared_ref.jpg"
-    assert reference_catalog[1]["ref_image_path"] == "/tmp/shared_ref.jpg"
+    assert "stage5_input" in payload
+    assert "aligned_storyboard" not in payload
+    assert "base_state_references" not in payload["stage5_input"]
+    assert payload["stage5_input"]["shots"][0]["reference_bindings"] == [{"reference_index": 1, "ref_id": "Ref_1"}]
 
 
 def test_job_state_flow_success_and_failure(build_client):

@@ -224,14 +224,14 @@ def test_service_generates_only_first_three_shots(tmp_path):
         },
     )
     store.write_json(
-        store.contract_path(task_id, "aligned_storyboard"),
+        store.contract_path(task_id, "normalized_scene_descriptions"),
         {
             "project_id": task_id,
-            "storyboard": [
-                {"shot_id": 1, "character_mappings": [{"ref_id": "Ref_1"}, {"ref_id": "Ref_2"}]},
-                {"shot_id": 2, "character_mappings": [{"ref_id": "Ref_1"}]},
-                {"shot_id": 3, "character_mappings": [{"ref_id": "Ref_2"}]},
-                {"shot_id": 4, "character_mappings": [{"ref_id": "Ref_1"}]},
+            "scenes": [
+                {"scene_id": 1, "desc": "（外貌）的Ref_1在街道上正在站立；（外貌）的Ref_2在街道上正在看向前方。"},
+                {"scene_id": 2, "desc": "（外貌）的Ref_1在街道上正在行走。"},
+                {"scene_id": 3, "desc": "（外貌）的Ref_2在街道上正在站立。"},
+                {"scene_id": 4, "desc": "（外貌）的Ref_1在街道上正在站立。"},
             ],
         },
     )
@@ -330,30 +330,13 @@ def test_generation_inputs_ignore_legacy_state_fields(tmp_path):
         {"project_id": task_id, "characters": [{"ref_id": "Ref_1", "ref_image_path": str(ref1)}]},
     )
     store.write_json(
-        store.contract_path(task_id, "aligned_storyboard"),
+        store.contract_path(task_id, "normalized_scene_descriptions"),
         {
             "project_id": task_id,
             "scenes": [
                 {
                     "scene_id": 1,
-                    "visual_analysis": {
-                        "subjects": [
-                            {
-                                "id": "Ref_1",
-                                "appearance": "女性，偏胖，紫色长辫子",
-                                "action": "站立",
-                                "expression": "平静",
-                            },
-                            {
-                                "id": "",
-                                "appearance": "背景路人",
-                                "action": "路过",
-                                "expression": "模糊",
-                            },
-                        ],
-                        "environment": {"location": "室内", "lighting": "明亮", "atmosphere": "自然"},
-                        "camera": {"shot_size": "中景", "angle": "平视", "movement": "固定镜头"},
-                    },
+                    "desc": "（女性，偏胖，紫色长辫子）的Ref_1在室内正在站立。",
                 }
             ],
         },

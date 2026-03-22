@@ -47,6 +47,10 @@ class VideoDownloader:
             "no_warnings": True,
             "socket_timeout": 30,
         }
+        node_path = shutil.which("node")
+        if node_path:
+            opts["js_runtimes"] = {"node": {"path": node_path}}
+            opts["remote_components"] = ["ejs:github"]
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:

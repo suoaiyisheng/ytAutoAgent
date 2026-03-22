@@ -759,15 +759,15 @@ class ImageGenerationService:
 
         physical_manifest_path = self.store.contract_path(task_id, "physical_manifest")
         character_bank_path = self.store.contract_path(task_id, "character_bank")
-        aligned_storyboard_path = self.store.contract_path(task_id, "aligned_storyboard")
+        normalized_scene_descriptions_path = self.store.contract_path(task_id, "normalized_scene_descriptions")
         final_table_path = self.store.contract_path(task_id, "final_production_table")
-        for file_path in [physical_manifest_path, character_bank_path, aligned_storyboard_path, final_table_path]:
+        for file_path in [physical_manifest_path, character_bank_path, normalized_scene_descriptions_path, final_table_path]:
             if not file_path.exists():
                 raise Stage1Error("artifact_missing", f"缺少输入文件: {file_path}", 404)
 
         physical_manifest = self.store.read_json(physical_manifest_path)
         character_bank = self.store.read_json(character_bank_path)
-        aligned_storyboard = self.store.read_json(aligned_storyboard_path)
+        normalized_scene_descriptions = self.store.read_json(normalized_scene_descriptions_path)
         final_table = self.store.read_json(final_table_path)
 
         scene_assets: dict[int, dict[str, str]] = {}
@@ -796,18 +796,18 @@ class ImageGenerationService:
                 continue
             prompt_by_shot[sid] = item
 
-        storyboard_shots = self._normalize_aligned_storyboard_shots(aligned_storyboard)
+        normalized_shots = self._normalize_normalized_scene_shots(normalized_scene_descriptions)
         tasks = []
-        for shot in storyboard_shots:
+        for shot in normalized_shots:
             shot_id = int(shot.get("shot_id", 0))
             prompt_item = prompt_by_shot.get(shot_id, {})
 
             references = []
-            for idx, mapping in enumerate(shot.get("character_mappings", []), start=1):
-                ref_id = str(mapping.get("ref_id", "")).strip()
+            for binding in prompt_item.get("reference_bindings", []):
+                ref_id = str((binding or {}).get("ref_id", "")).strip()
                 references.append(
                     {
-                        "reference_index": idx,
+                        "reference_index": int((binding or {}).get("reference_index", 0)),
                         "ref_id": ref_id,
                         "image_path": ref_path_by_id.get(ref_id, ""),
                     }
@@ -831,12 +831,8 @@ class ImageGenerationService:
         self.store.write_json(path, payload)
         return payload
 
-    def _normalize_aligned_storyboard_shots(self, aligned_storyboard: dict[str, Any]) -> list[dict[str, Any]]:
-        storyboard_payload = aligned_storyboard.get("storyboard")
-        if isinstance(storyboard_payload, list):
-            return storyboard_payload
-
-        scenes_payload = aligned_storyboard.get("scenes")
+    def _normalize_normalized_scene_shots(self, normalized_scene_descriptions: dict[str, Any]) -> list[dict[str, Any]]:
+        scenes_payload = normalized_scene_descriptions.get("scenes")
         if not isinstance(scenes_payload, list):
             return []
 
@@ -846,14 +842,7 @@ class ImageGenerationService:
                 shot_id = int(scene.get("scene_id", 0))
             except (TypeError, ValueError):
                 continue
-            subjects = (scene.get("visual_analysis") or {}).get("subjects") or []
-            character_mappings = []
-            for subject in subjects:
-                ref_id = str((subject or {}).get("id", "")).strip()
-                if not ref_id:
-                    continue
-                character_mappings.append({"ref_id": ref_id})
-            shots.append({"shot_id": shot_id, "character_mappings": character_mappings})
+            shots.append({"shot_id": shot_id})
 
         return sorted(shots, key=lambda x: int(x.get("shot_id", 0)))
 

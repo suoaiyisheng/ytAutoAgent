@@ -26,7 +26,7 @@ class FakeSuccessPipeline:
             "physical_manifest": str((task_dir / "01_physical_manifest.json").resolve()),
             "raw_scene_descriptions": str((task_dir / "02_raw_scene_descriptions.json").resolve()),
             "character_bank": str((task_dir / "03_character_bank.json").resolve()),
-            "aligned_storyboard": str((task_dir / "04_aligned_storyboard.json").resolve()),
+            "normalized_scene_descriptions": str((task_dir / "04_normalized_scene_descriptions.json").resolve()),
             "final_production_table": str((task_dir / "05_final_production_table.json").resolve()),
         }
         artifacts = {
@@ -76,26 +76,13 @@ class FakeVLMProvider(VLMProvider):
             out.append(
                 {
                     "scene_id": sid,
-                    "visual_analysis": {
-                        "subjects": [
-                            {
-                                "temp_id": "subject_A",
-                                "appearance": appearance,
-                                "action": "向前走",
-                                "expression": "专注",
-                            }
-                        ],
-                        "environment": {
-                            "location": "街道",
-                            "lighting": "白天",
-                            "atmosphere": "紧张",
-                        },
-                        "camera": {
-                            "shot_size": "中景",
-                            "angle": "平视",
-                            "movement": "跟随镜头",
-                        },
-                    },
+                    "subjects": [
+                        {
+                            "subject_id": "subject_1",
+                            "appearance": appearance,
+                        }
+                    ],
+                    "desc": "subject_1 在街道上正在向前走。",
                 }
             )
         return out
@@ -112,7 +99,7 @@ class FakeVLMProvider(VLMProvider):
     def generate_production_table(
         self,
         character_bank,
-        aligned_storyboard,
+        stage5_input,
         architect_prompt: str,
         model: str,
         retry_max: int,
@@ -122,21 +109,22 @@ class FakeVLMProvider(VLMProvider):
             debug_context["architect_prompt"] = architect_prompt
             debug_context["stage5_protocol_prompt"] = "fake_stage5_protocol"
             debug_context["character_bank"] = character_bank
-            debug_context["aligned_storyboard"] = aligned_storyboard
+            debug_context["stage5_input"] = stage5_input
             debug_context["provider_request"] = {"provider": "fake", "model": model}
             debug_context["provider_raw_output"] = {"ok": True}
         prompts = []
-        for shot in aligned_storyboard.get("storyboard", []):
+        for shot in stage5_input.get("shots", []):
             sid = int(shot["shot_id"])
             prompts.append(
                 {
                     "shot_id": sid,
+                    "reference_bindings": shot.get("reference_bindings", []),
                     "image_prompt": f"{sid}，真实摄影风格，中景，平视。Ref_1站在街道上。",
                     "video_prompt": "跟随镜头，主体向前走，表情由专注变为坚定。",
                 }
             )
         return {
-            "project_id": aligned_storyboard.get("project_id", ""),
+            "project_id": stage5_input.get("project_id", ""),
             "prompts": prompts,
         }
 

@@ -75,7 +75,11 @@ def build_manager(settings: Settings) -> JobManager:
         )
         default_vlm_model = settings.qwen_vlm_model
     else:
-        vlm_provider = GeminiVLMProvider(api_key=settings.gemini_api_key)
+        vlm_provider = GeminiVLMProvider(
+            api_key=settings.gemini_api_key,
+            openrouter_api_key=settings.openrouter_api_key,
+            openrouter_base_url=settings.openrouter_base_url,
+        )
         default_vlm_model = settings.gemini_vlm_model
 
     if settings.embedding_provider == "qwen":
@@ -226,9 +230,17 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
             "gemini_api_key": HealthDependency(
                 available=(
                     bool(settings.gemini_api_key)
-                    or (settings.vlm_provider != "gemini" and settings.embedding_provider != "gemini")
+                    or settings.embedding_provider != "gemini"
                 ),
                 path="configured" if settings.gemini_api_key else None,
+            ),
+            "openrouter_api_key": HealthDependency(
+                available=(
+                    bool(settings.openrouter_api_key)
+                    or settings.vlm_provider != "gemini"
+                    or bool(settings.gemini_api_key)
+                ),
+                path="configured" if settings.openrouter_api_key else None,
             ),
             "qwen_api_key": HealthDependency(
                 available=(
