@@ -44,8 +44,10 @@ class Stage1Pipeline(
         timeout_sec: int,
         vlm_provider: VLMProvider,
         embedding_provider: EmbeddingProvider,
+        stage2_vlm_provider: VLMProvider | None = None,
         default_vlm_model: str = "gemini-1.5-pro",
         default_embed_model: str = "text-embedding-004",
+        default_stage2_vlm_model: str | None = None,
         default_retry_max: int = 2,
         default_batch_size: int = 4,
         architect_prompt_path: Path | None = None,
@@ -57,8 +59,10 @@ class Stage1Pipeline(
         self.store = store
         self.timeout_sec = timeout_sec
         self.vlm_provider = vlm_provider
+        self.stage2_vlm_provider = stage2_vlm_provider or vlm_provider
         self.embedding_provider = embedding_provider
         self.default_vlm_model = default_vlm_model
+        self.default_stage2_vlm_model = default_stage2_vlm_model or default_vlm_model
         self.default_embed_model = default_embed_model
         self.default_retry_max = max(0, default_retry_max)
         self.default_batch_size = max(1, default_batch_size)
@@ -70,7 +74,11 @@ class Stage1Pipeline(
         self.media_probe = media_probe or MediaProbe()
 
     def validate_ready(self) -> None:
-        for provider in (self.vlm_provider, self.embedding_provider):
+        seen: set[int] = set()
+        for provider in (self.stage2_vlm_provider, self.vlm_provider, self.embedding_provider):
+            if id(provider) in seen:
+                continue
+            seen.add(id(provider))
             ensure = getattr(provider, "ensure_ready", None)
             if callable(ensure):
                 ensure()

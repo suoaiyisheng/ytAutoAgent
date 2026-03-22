@@ -1,0 +1,19 @@
+{
+  "project_id": "task_weight_loss",
+  "contracts": {
+    "physical_manifest": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/01_physical_manifest.json",
+    "raw_scene_descriptions": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/02_raw_scene_descriptions.json",
+    "character_bank": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/03_character_bank.json",
+    "normalized_scene_descriptions": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/04_normalized_scene_descriptions.json",
+    "final_production_table": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/05_final_production_table.json"
+  },
+  "artifacts": {
+    "final_prompts.md": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/final_prompts.md",
+    "index.json": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/index.json"
+  },
+  "stats": {
+    "scene_count": 3,
+    "character_count": 1,
+    "prompt_count": 3
+  }
+}

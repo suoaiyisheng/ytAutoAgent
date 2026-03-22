@@ -67,6 +67,11 @@ def _to_image_status_response(record) -> ImageGenerationStatusResponse:
 
 def build_manager(settings: Settings) -> JobManager:
     store = TaskStore(settings.data_dir)
+    gemini_provider = GeminiVLMProvider(
+        api_key=settings.gemini_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        openrouter_base_url=settings.openrouter_base_url,
+    )
 
     if settings.vlm_provider == "qwen":
         vlm_provider = QwenVLMProvider(
@@ -75,12 +80,11 @@ def build_manager(settings: Settings) -> JobManager:
         )
         default_vlm_model = settings.qwen_vlm_model
     else:
-        vlm_provider = GeminiVLMProvider(
-            api_key=settings.gemini_api_key,
-            openrouter_api_key=settings.openrouter_api_key,
-            openrouter_base_url=settings.openrouter_base_url,
-        )
+        vlm_provider = gemini_provider
         default_vlm_model = settings.gemini_vlm_model
+
+    stage2_vlm_provider = gemini_provider if settings.openrouter_api_key and settings.openrouter_base_url else vlm_provider
+    default_stage2_vlm_model = settings.gemini_vlm_model if stage2_vlm_provider is gemini_provider else default_vlm_model
 
     if settings.embedding_provider == "qwen":
         embedding_provider = QwenEmbeddingProvider(
@@ -96,8 +100,10 @@ def build_manager(settings: Settings) -> JobManager:
         store=store,
         timeout_sec=settings.task_timeout_sec,
         vlm_provider=vlm_provider,
+        stage2_vlm_provider=stage2_vlm_provider,
         embedding_provider=embedding_provider,
         default_vlm_model=default_vlm_model,
+        default_stage2_vlm_model=default_stage2_vlm_model,
         default_embed_model=default_embed_model,
         default_retry_max=settings.pipeline_retry_max,
         default_batch_size=settings.pipeline_batch_size,

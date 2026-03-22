@@ -1,0 +1,35 @@
+{
+  "project_id": "task_weight_loss",
+  "scenes": [
+    {
+      "scene_id": 1,
+      "subjects": [
+        {
+          "subject_id": "subject_1",
+          "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖"
+        }
+      ],
+      "desc": "subject_1 在卧室穿衣镜前正在看着镜子哭泣。"
+    },
+    {
+      "scene_id": 2,
+      "subjects": [
+        {
+          "subject_id": "subject_1",
+          "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖"
+        }
+      ],
+      "desc": "subject_1 在客厅瑜伽垫上正在运动。"
+    },
+    {
+      "scene_id": 3,
+      "subjects": [
+        {
+          "subject_id": "subject_1",
+          "appearance": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型清瘦"
+        }
+      ],
+      "desc": "subject_1 在卧室穿衣镜前正在看向镜中的自己微笑。"
+    }
+  ]
+}

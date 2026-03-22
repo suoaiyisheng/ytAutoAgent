@@ -244,12 +244,16 @@ class PipelineStage3Mixin:
                     [str(member.get("appearance", "")).strip() for member in members if str(member.get("appearance", "")).strip()],
                     max_items=1,
                 )
+            ref_image_description = str(members[0].get("appearance", "")).strip()
 
             public_characters.append(
                 {
                     "ref_id": ref_id,
+                    "ref_name": f"参考图{ref_id.split('_')[-1]}",
                     "canonical_description": canonical_description,
                     "ref_image_path": str(item.get("ref_image_path", "")).strip(),
+                    "ref_image_description": ref_image_description,
+                    "ref_image_features": self._appearance_feature_tokens(ref_image_description),
                     "scene_presence": [
                         [int(member.get("scene_id", 0)), str(member.get("subject_id", "")).strip()]
                         for member in members
@@ -322,6 +326,17 @@ class PipelineStage3Mixin:
         normalized = str(text).replace("，", ",").replace("；", ",").replace("。", ",")
         parts = re.split(r"[,、]|和", normalized)
         return [part.strip() for part in parts if part.strip()]
+
+    def _appearance_feature_tokens(self, text: str) -> list[str]:
+        tokens: list[str] = []
+        for phrase in self._appearance_phrases(text):
+            cleaned = phrase.strip()
+            cleaned = re.sub(r"^(一名|一个|一位)", "", cleaned).strip()
+            cleaned = re.sub(r"^(身穿|穿着|穿)", "", cleaned).strip()
+            cleaned = re.sub(r"^(佩戴着|佩戴|戴着|戴)", "", cleaned).strip()
+            if cleaned and cleaned not in tokens:
+                tokens.append(cleaned)
+        return tokens
 
     def _pick_phrase(self, phrases: list[str], tokens: list[str]) -> str:
         for phrase in phrases:

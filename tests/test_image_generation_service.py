@@ -348,14 +348,6 @@ def test_generation_inputs_ignore_legacy_state_fields(tmp_path):
             "prompts": [
                 {
                     "shot_id": 1,
-                    "reference_bindings": [
-                        {
-                            "reference_index": 1,
-                            "ref_id": "Ref_1",
-                            "state_id": "legacy_state",
-                            "state_text": "历史状态",
-                        }
-                    ],
                     "image_prompt": "参考图1",
                     "video_prompt": "固定镜头",
                 }

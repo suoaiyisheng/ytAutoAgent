@@ -1,0 +1,31 @@
+{
+  "project_id": "task_weight_loss",
+  "video_metadata": {
+    "source_url": "https://example.com/test",
+    "fps": 30.0,
+    "resolution": "1920x1080"
+  },
+  "scenes": [
+    {
+      "scene_id": 1,
+      "start_time": "00:00:00.000",
+      "end_time": "00:00:01.200",
+      "keyframe_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/frames/frame_001.jpg",
+      "clip_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/clips/clip_001.mp4"
+    },
+    {
+      "scene_id": 2,
+      "start_time": "00:00:01.200",
+      "end_time": "00:00:02.600",
+      "keyframe_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/frames/frame_002.jpg",
+      "clip_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/clips/clip_002.mp4"
+    },
+    {
+      "scene_id": 3,
+      "start_time": "00:00:02.600",
+      "end_time": "00:00:04.000",
+      "keyframe_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/frames/frame_003.jpg",
+      "clip_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/clips/clip_003.mp4"
+    }
+  ]
+}

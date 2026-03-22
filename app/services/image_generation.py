@@ -782,11 +782,22 @@ class ImageGenerationService:
             }
 
         ref_path_by_id = {}
+        ref_path_by_name = {}
         for item in character_bank.get("characters", []):
             ref_id = str(item.get("ref_id", "")).strip()
             if not ref_id:
                 continue
-            ref_path_by_id[ref_id] = str(item.get("ref_image_path", "")).strip()
+            ref_name = str(item.get("ref_name", "")).strip()
+            if not ref_name and ref_id.startswith("Ref_"):
+                ref_name = f"参考图{ref_id.split('_')[-1]}"
+            ref_path = str(item.get("ref_image_path", "")).strip()
+            ref_path_by_id[ref_id] = ref_path
+            if ref_name:
+                ref_path_by_name[ref_name] = {
+                    "ref_id": ref_id,
+                    "image_path": ref_path,
+                    "reference_index": int(ref_name.replace("参考图", "") or 0) if ref_name.startswith("参考图") else 0,
+                }
 
         prompt_by_shot = {}
         for item in final_table.get("prompts", []):
@@ -802,16 +813,11 @@ class ImageGenerationService:
             shot_id = int(shot.get("shot_id", 0))
             prompt_item = prompt_by_shot.get(shot_id, {})
 
-            references = []
-            for binding in prompt_item.get("reference_bindings", []):
-                ref_id = str((binding or {}).get("ref_id", "")).strip()
-                references.append(
-                    {
-                        "reference_index": int((binding or {}).get("reference_index", 0)),
-                        "ref_id": ref_id,
-                        "image_path": ref_path_by_id.get(ref_id, ""),
-                    }
-                )
+            references = self._reference_images_from_desc(
+                desc=str(shot.get("desc", "")).strip(),
+                ref_path_by_id=ref_path_by_id,
+                ref_path_by_name=ref_path_by_name,
+            )
 
             tasks.append(
                 {
@@ -842,9 +848,40 @@ class ImageGenerationService:
                 shot_id = int(scene.get("scene_id", 0))
             except (TypeError, ValueError):
                 continue
-            shots.append({"shot_id": shot_id})
+            shots.append({"shot_id": shot_id, "desc": str(scene.get("desc", "")).strip()})
 
         return sorted(shots, key=lambda x: int(x.get("shot_id", 0)))
+
+    def _reference_images_from_desc(
+        self,
+        *,
+        desc: str,
+        ref_path_by_id: dict[str, str],
+        ref_path_by_name: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        references: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for token in re.findall(r"参考图\d+|Ref_\d+", desc):
+            if token.startswith("参考图"):
+                item = ref_path_by_name.get(token) or {}
+                ref_id = str(item.get("ref_id", "")).strip()
+                reference_index = int(item.get("reference_index", 0))
+                image_path = str(item.get("image_path", "")).strip()
+            else:
+                ref_id = token
+                reference_index = int(token.replace("Ref_", "") or 0)
+                image_path = str(ref_path_by_id.get(ref_id, "")).strip()
+            if not ref_id or ref_id in seen:
+                continue
+            seen.add(ref_id)
+            references.append(
+                {
+                    "reference_index": reference_index,
+                    "ref_id": ref_id,
+                    "image_path": image_path,
+                }
+            )
+        return references
 
     def _download_candidate_url(self, url: str, timeout_sec: int = 60) -> tuple[bytes, str]:
         request = urllib.request.Request(url=url, method="GET")

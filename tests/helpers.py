@@ -98,8 +98,8 @@ class FakeVLMProvider(VLMProvider):
 
     def generate_production_table(
         self,
-        character_bank,
         stage5_input,
+        stage5_protocol_prompt: str,
         architect_prompt: str,
         model: str,
         retry_max: int,
@@ -107,8 +107,7 @@ class FakeVLMProvider(VLMProvider):
     ):  # noqa: ARG002
         if isinstance(debug_context, dict):
             debug_context["architect_prompt"] = architect_prompt
-            debug_context["stage5_protocol_prompt"] = "fake_stage5_protocol"
-            debug_context["character_bank"] = character_bank
+            debug_context["stage5_protocol_prompt"] = stage5_protocol_prompt
             debug_context["stage5_input"] = stage5_input
             debug_context["provider_request"] = {"provider": "fake", "model": model}
             debug_context["provider_raw_output"] = {"ok": True}
@@ -118,7 +117,6 @@ class FakeVLMProvider(VLMProvider):
             prompts.append(
                 {
                     "shot_id": sid,
-                    "reference_bindings": shot.get("reference_bindings", []),
                     "image_prompt": f"{sid}，真实摄影风格，中景，平视。Ref_1站在街道上。",
                     "video_prompt": "跟随镜头，主体向前走，表情由专注变为坚定。",
                 }

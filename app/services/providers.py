@@ -11,6 +11,7 @@ from typing import Any
 
 from app.errors import Stage1Error
 
+# TODO：Stage2修改提示词使其更加详尽
 SCENE_DESCRIBE_PROMPT = """# Role
 你是一位专业的视觉结构化分析专家，负责将图像描述转化为原始分镜描述 JSON 数据。
 
@@ -82,8 +83,8 @@ class VLMProvider(ABC):
     @abstractmethod
     def generate_production_table(
         self,
-        character_bank: dict[str, Any],
         stage5_input: dict[str, Any],
+        stage5_protocol_prompt: str,
         architect_prompt: str,
         model: str,
         retry_max: int,
@@ -164,32 +165,13 @@ class GeminiVLMProvider(VLMProvider):
 
     def generate_production_table(
         self,
-        character_bank: dict[str, Any],
         stage5_input: dict[str, Any],
+        stage5_protocol_prompt: str,
         architect_prompt: str,
         model: str,
         retry_max: int,
         debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        stage5_protocol_prompt = (
-            "请严格按照系统规范输出最终 JSON。结构："
-            "{project_id, prompts:[{shot_id,reference_bindings:[{reference_index,ref_id}],image_prompt,video_prompt}]}。"
-            "不要输出 markdown，不要解释。"
-            "所有自然语言内容必须使用简体中文，"
-            "image_prompt 与 video_prompt 必须全中文（字段名保持英文）。"
-            "输入 shots 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
-            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}”，不得省略参考图编号。"
-            "输入还包含 reference_catalog（ref_id到参考图路径映射）。"
-            "你必须以 shots[].desc 为唯一场景事实来源，并以 reference_catalog 和 character_bank 为唯一身份事实来源来写提示词，禁止杜撰新增外貌、服装、配饰。"
-            "你必须逐镜头、逐角色保留 shots[].desc 中已经出现的具体外貌与动作事实，包括但不限于性别、体型、发型/发色、衣物、鱼尾、裸露特征、配饰、手持道具、相对位置、地点和动作。"
-            "若 shots[].desc 中已经写出具体特征，禁止在 image_prompt 或 video_prompt 中把这些特征压缩成模糊代称，例如“女孩”“男人”“角色”，除非同时保留关键特征短语。"
-            "若某个角色在当前镜头的 desc 中带有多项外貌特征，image_prompt 必须尽量完整覆盖这些特征，不能只保留其中一两项。"
-            "video_prompt 必须延续同一镜头 desc 中的角色特征和动作逻辑，不得只写抽象情绪变化而丢掉角色识别特征。"
-            "如果提示词遗漏了 desc 中的关键外貌、服装、道具或动作事实，这视为错误。"
-            "每个参考图编号必须严格对应 shots[].reference_bindings[].reference_index。"
-            "你必须读取 reference_catalog 中全部 Ref_n 的身份定义与参考图，不得只关注单个 Ref。"
-            "reference_catalog 仅用于编号与ref映射，不要在提示词中输出文件路径。"
-        )
         reference_parts = self._build_reference_image_parts(stage5_input)
         parts = [
             {"text": stage5_protocol_prompt},
@@ -199,7 +181,6 @@ class GeminiVLMProvider(VLMProvider):
         if isinstance(debug_context, dict):
             debug_context["architect_prompt"] = architect_prompt
             debug_context["stage5_protocol_prompt"] = stage5_protocol_prompt
-            debug_context["character_bank"] = json.loads(json.dumps(character_bank, ensure_ascii=False))
             debug_context["stage5_input"] = json.loads(json.dumps(stage5_input, ensure_ascii=False))
             if self.is_using_openrouter():
                 debug_context["provider_request"] = {
@@ -234,7 +215,6 @@ class GeminiVLMProvider(VLMProvider):
                 prompts.append(
                     {
                         "shot_id": int(item.get("shot_id", 0)),
-                        "reference_bindings": item.get("reference_bindings", []),
                         "image_prompt": str(item.get("image_prompt", "")).strip(),
                         "video_prompt": str(item.get("video_prompt", "")).strip(),
                     }
@@ -247,18 +227,14 @@ class GeminiVLMProvider(VLMProvider):
         raise Stage1Error("vlm_invalid_output", "Gemini 返回的最终提示词表格式无效", 502)
 
     def _build_reference_image_parts(self, stage5_input: dict[str, Any]) -> list[dict[str, Any]]:
-        reference_catalog = stage5_input.get("reference_catalog")
-        if not isinstance(reference_catalog, list):
-            return []
-
         parts: list[dict[str, Any]] = []
-        for idx, item in enumerate(reference_catalog, start=1):
+        for item in self._collect_stage5_references(stage5_input):
             if not isinstance(item, dict):
                 continue
-            ref_id = str(item.get("ref_id", "")).strip()
-            if not ref_id:
+            ref_name = str(item.get("ref_name", "")).strip()
+            if not ref_name:
                 continue
-            parts.append({"text": f"参考图{idx} 对应 {ref_id}。"})
+            parts.append({"text": f"{ref_name}。"})
 
             ref_image_path = str(item.get("ref_image_path", "")).strip()
             if ref_image_path:
@@ -272,8 +248,44 @@ class GeminiVLMProvider(VLMProvider):
 
             ref_image_url = str(item.get("ref_image_url", "")).strip()
             if ref_image_url:
-                parts.append({"text": f"{ref_id} 参考图URL: {ref_image_url}"})
+                parts.append({"text": f"{ref_name} 参考图URL: {ref_image_url}"})
         return parts
+
+    def _collect_stage5_references(self, stage5_input: dict[str, Any]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        collected: list[dict[str, Any]] = []
+
+        shots = stage5_input.get("shots")
+        if isinstance(shots, list):
+            for shot in shots:
+                if not isinstance(shot, dict):
+                    continue
+                references = shot.get("references")
+                if not isinstance(references, list):
+                    continue
+                for item in references:
+                    if not isinstance(item, dict):
+                        continue
+                    ref_name = str(item.get("ref_name", "")).strip()
+                    if not ref_name or ref_name in seen:
+                        continue
+                    seen.add(ref_name)
+                    collected.append(item)
+        if collected:
+            return collected
+
+        reference_catalog = stage5_input.get("reference_catalog")
+        if not isinstance(reference_catalog, list):
+            return []
+        for item in reference_catalog:
+            if not isinstance(item, dict):
+                continue
+            ref_name = str(item.get("ref_name", "")).strip()
+            if not ref_name or ref_name in seen:
+                continue
+            seen.add(ref_name)
+            collected.append(item)
+        return collected
 
     def _generate_json(
         self,
@@ -693,30 +705,13 @@ class QwenVLMProvider(VLMProvider):
 
     def generate_production_table(
         self,
-        character_bank: dict[str, Any],
         stage5_input: dict[str, Any],
+        stage5_protocol_prompt: str,
         architect_prompt: str,
         model: str,
         retry_max: int,
         debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        stage5_protocol_prompt = (
-            "请严格按系统规范输出 JSON："
-            "{\"project_id\":\"string\",\"prompts\":[{\"shot_id\":number,\"reference_bindings\":[{\"reference_index\":number,\"ref_id\":\"string\"}],\"image_prompt\":\"string\",\"video_prompt\":\"string\"}]}"
-            "。所有自然语言必须使用简体中文，不要输出 markdown，不要解释。"
-            "输入 shots 中每个 shot 都有 reference_bindings，必须原样保留到对应 prompts[].reference_bindings。"
-            "在 image_prompt 中引用角色时，必须写“参考图{reference_index}”，不得省略参考图编号。"
-            "输入还包含 reference_catalog（ref_id到参考图路径映射）。"
-            "你必须以 shots[].desc 为唯一场景事实来源，并以 reference_catalog 和 character_bank 为唯一身份事实来源来写提示词，禁止杜撰新增外貌、服装、配饰。"
-            "你必须逐镜头、逐角色保留 shots[].desc 中已经出现的具体外貌与动作事实，包括但不限于性别、体型、发型/发色、衣物、鱼尾、裸露特征、配饰、手持道具、相对位置、地点和动作。"
-            "若 shots[].desc 中已经写出具体特征，禁止在 image_prompt 或 video_prompt 中把这些特征压缩成模糊代称，例如“女孩”“男人”“角色”，除非同时保留关键特征短语。"
-            "若某个角色在当前镜头的 desc 中带有多项外貌特征，image_prompt 必须尽量完整覆盖这些特征，不能只保留其中一两项。"
-            "video_prompt 必须延续同一镜头 desc 中的角色特征和动作逻辑，不得只写抽象情绪变化而丢掉角色识别特征。"
-            "如果提示词遗漏了 desc 中的关键外貌、服装、道具或动作事实，这视为错误。"
-            "每个参考图编号必须严格对应 shots[].reference_bindings[].reference_index。"
-            "你必须读取 reference_catalog 中全部 Ref_n 的身份定义与参考图，不得只关注单个 Ref。"
-            "reference_catalog 仅用于编号与ref映射，不要在提示词中输出文件路径。"
-        )
         reference_contents = self._build_reference_image_contents(stage5_input)
         messages = [
             {
@@ -738,7 +733,6 @@ class QwenVLMProvider(VLMProvider):
         if isinstance(debug_context, dict):
             debug_context["architect_prompt"] = architect_prompt
             debug_context["stage5_protocol_prompt"] = stage5_protocol_prompt
-            debug_context["character_bank"] = json.loads(json.dumps(character_bank, ensure_ascii=False))
             debug_context["stage5_input"] = json.loads(json.dumps(stage5_input, ensure_ascii=False))
             debug_context["provider_request"] = {
                 "provider": "qwen",
@@ -760,7 +754,6 @@ class QwenVLMProvider(VLMProvider):
                 prompts.append(
                     {
                         "shot_id": int(item.get("shot_id", 0)),
-                        "reference_bindings": item.get("reference_bindings", []),
                         "image_prompt": str(item.get("image_prompt", "")).strip(),
                         "video_prompt": str(item.get("video_prompt", "")).strip(),
                     }
@@ -772,18 +765,14 @@ class QwenVLMProvider(VLMProvider):
         raise Stage1Error("vlm_invalid_output", "Qwen 返回的最终提示词表格式无效", 502)
 
     def _build_reference_image_contents(self, stage5_input: dict[str, Any]) -> list[dict[str, Any]]:
-        reference_catalog = stage5_input.get("reference_catalog")
-        if not isinstance(reference_catalog, list):
-            return []
-
         content: list[dict[str, Any]] = []
-        for idx, item in enumerate(reference_catalog, start=1):
+        for item in self._collect_stage5_references(stage5_input):
             if not isinstance(item, dict):
                 continue
-            ref_id = str(item.get("ref_id", "")).strip()
-            if not ref_id:
+            ref_name = str(item.get("ref_name", "")).strip()
+            if not ref_name:
                 continue
-            content.append({"type": "text", "text": f"参考图{idx} 对应 {ref_id}。"})
+            content.append({"type": "text", "text": f"{ref_name}。"})
 
             ref_image_url = str(item.get("ref_image_url", "")).strip()
             if ref_image_url:

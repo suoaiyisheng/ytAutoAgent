@@ -1,0 +1,38 @@
+{
+  "project_id": "task_weight_loss",
+  "prompts": [
+    {
+      "shot_id": 1,
+      "reference_bindings": [
+        {
+          "reference_index": 1,
+          "ref_id": "Ref_1"
+        }
+      ],
+      "image_prompt": "镜头1，参考图1。",
+      "video_prompt": "固定镜头。"
+    },
+    {
+      "shot_id": 2,
+      "reference_bindings": [
+        {
+          "reference_index": 1,
+          "ref_id": "Ref_1"
+        }
+      ],
+      "image_prompt": "镜头2，参考图1。",
+      "video_prompt": "固定镜头。"
+    },
+    {
+      "shot_id": 3,
+      "reference_bindings": [
+        {
+          "reference_index": 1,
+          "ref_id": "Ref_1"
+        }
+      ],
+      "image_prompt": "镜头3，参考图1。",
+      "video_prompt": "固定镜头。"
+    }
+  ]
+}

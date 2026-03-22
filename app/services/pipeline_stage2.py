@@ -38,14 +38,16 @@ class PipelineStage2Mixin:
 
         batch_size = int(params.get("batch_size") or self.default_batch_size)
         retry_max = int(params.get("retry_max") if params.get("retry_max") is not None else self.default_retry_max)
-        vlm_model = str(params.get("vlm_model") or self.default_vlm_model)
+        stage2_provider = getattr(self, "stage2_vlm_provider", self.vlm_provider)
+        stage2_default_model = getattr(self, "default_stage2_vlm_model", self.default_vlm_model)
+        vlm_model = str(params.get("stage2_vlm_model") or params.get("vlm_model") or stage2_default_model)
 
         all_rows: list[dict[str, Any]] = []
         total_batches = max(1, math.ceil(len(scene_inputs) / batch_size))
 
         for batch_idx, start in enumerate(range(0, len(scene_inputs), batch_size), start=1):
             batch = scene_inputs[start : start + batch_size]
-            rows = self.vlm_provider.describe_scenes(
+            rows = stage2_provider.describe_scenes(
                 scene_inputs=batch,
                 model=vlm_model,
                 retry_max=retry_max,

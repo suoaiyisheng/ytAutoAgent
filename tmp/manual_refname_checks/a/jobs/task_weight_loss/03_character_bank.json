@@ -1,0 +1,35 @@
+{
+  "project_id": "task_weight_loss",
+  "characters": [
+    {
+      "ref_id": "Ref_1",
+      "ref_name": "参考图1",
+      "canonical_description": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖；女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型清瘦",
+      "ref_image_path": "/Users/wenyue.wei/Projects/ytAuto/tmp/manual_refname_checks/a/jobs/task_weight_loss/frames/frame_001.jpg",
+      "ref_image_description": "女性，长发，穿浅蓝色运动T恤、黑色紧身裤和白色运动鞋，体型偏胖",
+      "ref_image_features": [
+        "女性",
+        "长发",
+        "浅蓝色运动T恤",
+        "黑色紧身裤",
+        "白色运动鞋",
+        "体型偏胖"
+      ],
+      "scene_presence": [
+        [
+          1,
+          "subject_1"
+        ],
+        [
+          2,
+          "subject_1"
+        ],
+        [
+          3,
+          "subject_1"
+        ]
+      ]
+    }
+  ],
+  "global_style": "真实摄影风格"
+}

@@ -151,3 +151,148 @@ class PipelineCommonMixin:
         if not values:
             return 0.0
         return sum(values) / len(values)
+
+    def _appearance_signature_text(self, text: str) -> str:
+        raw_text = str(text).strip()
+        if not raw_text:
+            return ""
+
+        parts: list[str] = []
+        parse_features = getattr(self, "_parse_subject_features", None)
+        if callable(parse_features):
+            features = parse_features(raw_text, "")
+            gender = str(features.get("gender", "unknown"))
+            role = str(features.get("role", "human"))
+            gender_label = {
+                "female": "女性",
+                "male": "男性",
+            }.get(gender, "")
+            role_label = {
+                "doctor": "医生",
+                "mermaid": "美人鱼",
+            }.get(role, "")
+            if gender_label:
+                parts.append(gender_label)
+            if role_label:
+                parts.append(role_label)
+
+        appearance_profile_from_text = getattr(self, "_appearance_profile_from_text", None)
+        profile_to_description = getattr(self, "_profile_to_description", None)
+        if callable(appearance_profile_from_text) and callable(profile_to_description):
+            profile = appearance_profile_from_text(raw_text)
+            profile_text = str(profile_to_description(profile)).strip()
+            if profile_text:
+                parts.append(profile_text)
+
+        unique_parts: list[str] = []
+        for part in parts:
+            cleaned = str(part).strip()
+            if cleaned and cleaned not in unique_parts:
+                unique_parts.append(cleaned)
+        return "，".join(unique_parts) or raw_text
+
+    def _prime_embedding_cache(
+        self,
+        *,
+        texts: list[str],
+        embed_model: str,
+        retry_max: int,
+        embedding_cache: dict[str, list[float]],
+    ) -> None:
+        missing: list[str] = []
+        for text in texts:
+            cleaned = str(text).strip()
+            if cleaned and cleaned not in embedding_cache and cleaned not in missing:
+                missing.append(cleaned)
+        if not missing:
+            return
+
+        vectors = self.embedding_provider.embed_texts(missing, model=embed_model, retry_max=retry_max)
+        for text, vector in zip(missing, vectors, strict=False):
+            embedding_cache[text] = vector
+
+    def _appearance_match_score(
+        self,
+        *,
+        current_appearance: str,
+        ref_image_description: str,
+        embed_model: str,
+        retry_max: int,
+        embedding_cache: dict[str, list[float]] | None = None,
+    ) -> float:
+        current_text = str(current_appearance).strip()
+        ref_text = str(ref_image_description).strip()
+        if not current_text or not ref_text:
+            return 0.0
+
+        parse_features = getattr(self, "_parse_subject_features", None)
+        if not callable(parse_features):
+            return 1.0 if current_text == ref_text else 0.0
+
+        current_parsed = parse_features(current_text, "")
+        ref_parsed = parse_features(ref_text, "")
+
+        current_gender = str(current_parsed.get("gender", "unknown"))
+        ref_gender = str(ref_parsed.get("gender", "unknown"))
+        if current_gender != "unknown" and ref_gender != "unknown" and current_gender != ref_gender:
+            return 0.0
+
+        current_anchor = set(current_parsed.get("anchors", []))
+        ref_anchor = set(ref_parsed.get("anchors", []))
+        anchor_sim = self._jaccard(current_anchor, ref_anchor)
+
+        struct_parts: list[float] = []
+        for key in ["gender", "role", "hair_color", "hair_style", "body_type"]:
+            left = str(current_parsed.get(key, "unknown"))
+            right = str(ref_parsed.get(key, "unknown"))
+            if left == "unknown" or right == "unknown":
+                continue
+            struct_parts.append(1.0 if left == right else 0.0)
+        struct_sim = (sum(struct_parts) / len(struct_parts)) if struct_parts else 0.5
+
+        current_signature = self._appearance_signature_text(current_text)
+        ref_signature = self._appearance_signature_text(ref_text)
+        vector_sim = 0.0
+        cache = embedding_cache if embedding_cache is not None else {}
+        if current_signature and ref_signature:
+            self._prime_embedding_cache(
+                texts=[current_signature, ref_signature],
+                embed_model=embed_model,
+                retry_max=retry_max,
+                embedding_cache=cache,
+            )
+            vector_sim = max(
+                0.0,
+                self._cosine(
+                    cache.get(current_signature, []),
+                    cache.get(ref_signature, []),
+                ),
+            )
+
+        score = (0.50 * vector_sim) + (0.30 * anchor_sim) + (0.20 * struct_sim)
+
+        current_role = str(current_parsed.get("role", "human"))
+        ref_role = str(ref_parsed.get("role", "human"))
+        if current_role != ref_role and {current_role, ref_role} != {"human", "mermaid"}:
+            score -= 0.15
+
+        return max(0.0, min(1.0, score))
+
+    def _appearance_matches_reference(
+        self,
+        *,
+        current_appearance: str,
+        ref_image_description: str,
+        embed_model: str,
+        retry_max: int,
+        embedding_cache: dict[str, list[float]] | None = None,
+        threshold: float = 0.80,
+    ) -> bool:
+        score = self._appearance_match_score(
+            current_appearance=current_appearance,
+            ref_image_description=ref_image_description,
+            embed_model=embed_model,
+            retry_max=retry_max,
+            embedding_cache=embedding_cache,
+        )
+        return score >= threshold
